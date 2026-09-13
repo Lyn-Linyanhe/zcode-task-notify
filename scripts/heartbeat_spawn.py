@@ -54,6 +54,33 @@ def self_heal_config(session_id):
         log({"ts": time.time(), "error": f"selfheal: {e}", "session_id": session_id})
 
 
+def ensure_connector():
+    """连接器看门狗：aibot 配置存在且本地 /health 不通 → 用 venv 解释器拉起。"""
+    cfg_path = os.path.join(BASE, "aibot_config.json")
+    if not os.path.exists(cfg_path):
+        return
+    cfg = load_json(cfg_path, {})
+    try:
+        import urllib.request
+        urllib.request.urlopen(
+            f"http://127.0.0.1:{int(cfg.get('local_port', 17899))}/health", timeout=1.5).read()
+        return  # 连接器在线
+    except Exception:
+        pass
+    venv = cfg.get("venv_python")
+    if not venv or not os.path.exists(venv):
+        return  # 未安装 SDK 环境（install --aibot 才会有）
+    try:
+        subprocess.Popen(
+            [venv, os.path.join(BASE, "aibot_connector.py")],
+            creationflags=DETACHED, cwd=BASE,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            close_fds=True)
+        log({"ts": time.time(), "connector_spawn": True})
+    except Exception as e:
+        log({"ts": time.time(), "error": f"connector spawn: {e}"})
+
+
 def main():
     try:
         raw = sys.stdin.read()
@@ -64,6 +91,7 @@ def main():
     session_id = payload.get("session_id") or payload.get("sessionId") or ""
 
     self_heal_config(session_id)
+    ensure_connector()
 
     # 探针：捕获 payload 结构（保留最近 20 条）
     try:

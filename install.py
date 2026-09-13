@@ -73,16 +73,59 @@ def uninstall(target):
     return 0
 
 
+def install_aibot(args):
+    """--aibot：创建 SDK 虚拟环境 + 写 aibot_config.json（手机批准/拒绝功能）。"""
+    import subprocess
+    import venv as venv_mod
+    venv_dir = os.path.join(HERE, ".venv-aibot")
+    venv_py = os.path.join(venv_dir, "Scripts", "python.exe")
+    if not os.path.exists(venv_py):
+        print("[..] 创建 SDK 虚拟环境 .venv-aibot ...")
+        venv_mod.create(venv_dir, with_pip=True)
+    print("[..] 安装 wecom-aibot-python-sdk（需联网）...")
+    r = subprocess.run([venv_py, "-m", "pip", "install", "--quiet",
+                        "wecom-aibot-python-sdk"], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"[FAIL] SDK 安装失败: {r.stderr[-300:]}")
+        return 1
+    cfg_path = os.path.join(SCRIPTS_DIR, "aibot_config.json")
+    cfg = read_json(cfg_path, {})
+    if args.bot_id:
+        cfg["bot_id"] = args.bot_id
+    if args.bot_secret:
+        cfg["secret"] = args.bot_secret
+    if not cfg.get("bot_id") or not cfg.get("secret"):
+        print("[FAIL] 缺 Bot ID / Secret。在企业微信 机器人详情→API设置 复制后重跑：")
+        print('       python install.py --aibot --bot-id "..." --bot-secret "..."')
+        return 1
+    cfg.setdefault("target_userid", "")
+    cfg.setdefault("local_port", 17899)
+    cfg.setdefault("card_timeout_sec", 100)
+    cfg["venv_python"] = venv_py
+    write_json(cfg_path, cfg)
+    print(f"[ok] 已生成 {cfg_path}（Secret 只存本地，.gitignore 已排除）")
+    print("[note] 给机器人发一条单聊消息，连接器会自动捕获推送地址并就绪")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--webhook", default="", help="企业微信群机器人 webhook 地址")
     ap.add_argument("--target", default=os.path.expanduser("~"), help=".zcode 所在根目录（默认用户主目录）")
     ap.add_argument("--test", action="store_true", help="安装后向 webhook 发一条测试消息")
     ap.add_argument("--uninstall", action="store_true", help="移除本工具注册的 hooks（保留其他配置）")
+    ap.add_argument("--aibot", action="store_true", help="安装「手机批准/拒绝」组件（智能机器人长连接）")
+    ap.add_argument("--bot-id", default="", help="智能机器人 Bot ID（--aibot 用）")
+    ap.add_argument("--bot-secret", default="", help="智能机器人 Secret（--aibot 用）")
     args = ap.parse_args()
 
     if args.uninstall:
         return uninstall(args.target)
+
+    if args.aibot:
+        rc = install_aibot(args)
+        if rc != 0:
+            return rc
 
     # 1) 生成 scripts/config.json
     cfg_path = os.path.join(SCRIPTS_DIR, "config.json")
@@ -147,7 +190,8 @@ def main():
                 "type": "process",
                 "command": sys.executable or "python",
                 "args": [os.path.join(SCRIPTS_DIR, entry_script)],
-                "timeoutMs": 5000,
+                # PermissionRequest 给手机批准留 120s 决策窗口（连接器不在线时流程秒退，不受影响）
+                "timeoutMs": 120000 if event == "PermissionRequest" else 5000,
             }]
         })
         events[event] = kept

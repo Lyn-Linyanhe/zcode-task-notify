@@ -166,6 +166,33 @@ def main():
     except Exception:
         payload = {}
 
+    event = payload.get("hookEventName") or payload.get("hook_event_name") or "?"
+
+    # PermissionRequest：优先手机卡片批准/拒绝（阻塞流，超时或连接器不在线自动降级）
+    if event == "PermissionRequest":
+        decision = "fallback"
+        try:
+            import approve_flow
+            decision = approve_flow.run(payload)
+        except Exception as e:
+            log({"ts": time.time(), "error": f"approve_flow: {e}"})
+        if decision in ("allow", "deny"):
+            decision_obj = {"behavior": decision}
+            if decision == "deny":
+                decision_obj["message"] = "已在手机上拒绝（zcode通知）"
+            print(json.dumps({"hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": decision_obj}}, ensure_ascii=False))
+            log({"ts": time.time(), "approved": decision,
+                 "session_id": str(payload.get("session_id", "?"))[:20]})
+            return 0
+        if decision is None:
+            # 超时未决定：不输出任何内容，ZCode 自动回退桌面 UI 确认
+            log({"ts": time.time(), "approved": "timeout",
+                 "session_id": str(payload.get("session_id", "?"))[:20]})
+            return 0
+        # decision == "fallback" → 继续走下方 webhook ⏸️ 通知
+
     # 快速闸门：开关关闭就不 spawn（详细过滤在 worker 里）
     state = load_json(STATE_PATH, {"enabled": True})
     if not state.get("enabled", True):

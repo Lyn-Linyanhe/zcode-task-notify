@@ -127,6 +127,30 @@ def main():
     else:
         check("LLM 摘要", True, "未启用（使用启发式摘要）", warn=True)
 
+    # 9. aibot 手机批准（可选）
+    acfg = load_json(find_file("aibot_config.json") or "", {})
+    if acfg.get("bot_id"):
+        check("aibot 凭据（bot_id/secret）", bool(acfg.get("secret")),
+              "aibot_config.json 缺 secret")
+        venv_py = acfg.get("venv_python") or ""
+        sdk_ok = bool(venv_py) and os.path.exists(venv_py)
+        check("aibot SDK 环境", sdk_ok, "未找到 venv 解释器，重跑 python install.py --aibot")
+        if sdk_ok:
+            online = False
+            try:
+                import urllib.request
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{int(acfg.get('local_port', 17899))}/health",
+                        timeout=2) as resp:
+                    online = bool(json.loads(resp.read().decode()).get("connected"))
+            except Exception:
+                pass
+            check("aibot 连接器在线", online,
+                  "未在线（下次发消息时看门狗自动拉起；也可手动用 venv python 跑 aibot_connector.py）",
+                  warn=True)
+    else:
+        check("aibot 手机批准", True, "未启用（可选功能，见 README「手机批准/拒绝」）", warn=True)
+
     # 汇总
     fails = [r for r in results if r[1] == "FAIL"]
     warns = [r for r in results if r[1] == "WARN"]

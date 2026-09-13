@@ -1,0 +1,8 @@
+{
+ "bot_id": "企业微信 智能机器人详情→API设置 里的 Bot ID",
+ "secret": "同一页的 Secret（随机获取后务必点保存）",
+ "target_userid": "留空即可：首次给机器人发单聊消息时自动捕获",
+ "local_port": 17899,
+ "card_timeout_sec": 100,
+ "venv_python": "python install.py --aibot 时自动填"
+}

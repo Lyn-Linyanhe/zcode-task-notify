@@ -14,3 +14,11 @@ hook_fired.txt
 __pycache__/
 *.pyc
 .venv/
+
+# aibot（手机批准/拒绝）
+aibot_config.json
+decisions/
+aibot_connector.lock
+.venv-aibot/
+aibot_poc*
+aibot_poc_frames.jsonl
