@@ -34,7 +34,7 @@ ZCode hooks（会话进程启动时加载，Stop/PermissionRequest/UserPromptSub
 
 - Windows 10/11（使用了 Win32 进程枚举与分离进程 API）
 - ZCode 桌面端 **3.11.2+**（hooks schema 在此版本验证）
-- Python 3.10+（仅标准库，无第三方依赖）
+- Python 3.10+（仅标准库，无第三方依赖；**安装时记得勾选 "Add Python to PATH"**）
 - 手机安装**企业微信 App**（接收通知的终点）
 - 一个企业微信群机器人 webhook（免费，获取步骤见下）
 
@@ -62,25 +62,25 @@ ZCode hooks（会话进程启动时加载，Stop/PermissionRequest/UserPromptSub
 
 **4. 先测一下能不能收到（可选但推荐）**
 
-在 Windows PowerShell 里执行（把地址换成你的）：
+把下面命令里的地址换成你的 webhook，用 Python 执行（UTF-8 编码可靠，中文不会乱码）：
 
-```powershell
-Invoke-RestMethod -Uri "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的key" -Method Post -ContentType "application/json" -Body '{"msgtype":"text","text":{"content":"测试消息"}}'
+```bash
+python -c "import json,urllib.request; req=urllib.request.Request('https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的key', data=json.dumps({'msgtype':'text','text':{'content':'测试消息 from zcode-task-notify'}}).encode('utf-8'), headers={'Content-Type':'application/json'}); print(urllib.request.urlopen(req).read().decode())"
 ```
 
-手机企业微信收到「测试消息」即通道打通。返回 `{"errcode":0,"errmsg":"ok"}` 同样代表成功。
+手机企业微信收到「测试消息」即通道打通。输出 `{"errcode":0,"errmsg":"ok"}` 同样代表成功。
 
 > ⚠️ Webhook 地址等同「往这个群发消息的钥匙」，**不要发到公开场合**或提交到 git（本仓库的 .gitignore 已排除含 key 的 config.json）。
 
 ## 第二步：安装
 
-clone 本仓库后运行安装脚本（webhook 用第一步拿到的地址）：
+clone 本仓库（若 GitHub 访问慢，可在仓库页点 **Code → Download ZIP**）后，运行安装脚本（webhook 用第一步拿到的地址）：
 
 ```bash
 python install.py --webhook "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的key"
 ```
 
-脚本会：生成 `scripts/config.json` 与开关文件、**自动备份并合并** hooks 配置到 `%USERPROFILE%\.zcode\cli\config.json`（只改 `hooks` 键，其他配置原样保留，并有带时间戳的备份）。
+脚本会：生成 `scripts/config.json` 与开关文件、**自动备份并合并** hooks 配置到 `%USERPROFILE%\.zcode\cli\config.json`（只改 `hooks` 键，其他配置和已有的其他 hook 原样保留，并有带时间戳的备份；重复运行不会重复挂载）。
 
 **（可选）接入 LLM 摘要**：在 [bigmodel.cn 控制台](https://bigmodel.cn/console/usercenter/apikeys) 创建一个 API Key（免费注册），然后编辑 `scripts/config.json`：
 
@@ -111,6 +111,12 @@ python install.py --webhook "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?ke
 | `heartbeat_max_hours` | `4` | 心跳最长跟踪时长（小时） |
 
 开关：`scripts/state.json` 的 `enabled` 字段（`true`/`false`）。
+
+## 卸载
+
+1. 删除 hooks：用 `%USERPROFILE%\.zcode\cli\config.json` 旁的备份文件（`config.json.bak-<时间戳>`）覆盖回去；或手动把 `hooks.events` 里 `args` 指向本工具 `scripts` 的条目删掉；
+2. 删除本仓库目录即可（无残留、无系统级安装）；
+3. （可选）进入企业微信群 → 群机器人 → 移除机器人。
 
 ## 已知坑与设计决策（实测踩出来的，重要）
 

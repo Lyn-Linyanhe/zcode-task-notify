@@ -84,18 +84,37 @@ def main():
     hooks = existing.get("hooks") or {}
     hooks["enabled"] = True
     events = hooks.get("events") or {}
+    our_norm = {os.path.normcase(os.path.join(SCRIPTS_DIR, n))
+                for n in ("notify.py", "heartbeat_spawn.py")}
+
+    def is_ours(group):
+        """识别本工具的旧条目（用于幂等重装，避免重复挂载）。"""
+        if not isinstance(group, dict):
+            return False
+        for h in (group.get("hooks") or []):
+            for a in ((h or {}).get("args") or []):
+                if os.path.normcase(a) in our_norm:
+                    return True
+        return False
+
     for event in HOOK_EVENTS:
         entry_script = "heartbeat_spawn.py" if event == "UserPromptSubmit" else "notify.py"
-        events[event] = [{
-            "type": "process",
-            "command": sys.executable or "python",
-            "args": [os.path.join(SCRIPTS_DIR, entry_script)],
-            "timeoutMs": 5000,
-        }]
+        kept = [g for g in (events.get(event) or []) if not is_ours(g)]
+        # 注意：ZCode 的 events schema 是 [{matcher?, hooks:[定义]}] 的嵌套结构（strict 校验），
+        # 不是扁平的 hook 定义数组——写错会被静默拒绝。
+        kept.append({
+            "hooks": [{
+                "type": "process",
+                "command": sys.executable or "python",
+                "args": [os.path.join(SCRIPTS_DIR, entry_script)],
+                "timeoutMs": 5000,
+            }]
+        })
+        events[event] = kept
     hooks["events"] = events
     existing["hooks"] = hooks
     write_json(zcode_cfg, existing)
-    print(f"[ok] hooks 已写入 {zcode_cfg}（事件: {', '.join(HOOK_EVENTS)}）")
+    print(f"[ok] hooks 已写入 {zcode_cfg}（事件: {', '.join(HOOK_EVENTS)}；已有其他 hook 保留不动）")
 
     print("""
 安装完成。接下来：
