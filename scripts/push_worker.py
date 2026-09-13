@@ -28,14 +28,30 @@ def bot_session_ids():
 
 def turn_status(turn_id):
     if not turn_id:
-        return None, None
+        return None, None, None
     try:
         con = sqlite3.connect(SESSION_DB, timeout=3)
-        row = con.execute("SELECT status, error_code FROM turn_usage WHERE turn_id=?", (turn_id,)).fetchone()
+        row = con.execute("SELECT status, error_code, duration_ms FROM turn_usage WHERE turn_id=?",
+                          (turn_id,)).fetchone()
         con.close()
-        return (row[0], row[1]) if row else (None, None)
+        return (row[0], row[1], row[2]) if row else (None, None, None)
     except Exception:
-        return None, None
+        return None, None, None
+
+
+def format_duration(ms):
+    """turn_usage.duration_ms → 「23 分钟」样式的文本；缺失或几秒的回合返回空（不值得标）。"""
+    try:
+        s = int(ms) // 1000
+    except (TypeError, ValueError):
+        return ""
+    if s < 60:
+        return f"{s} 秒" if s >= 10 else ""
+    if s < 3600:
+        return f"{round(s / 60)} 分钟"
+    h, rem = divmod(s, 3600)
+    m = round(rem / 60)
+    return f"{h} 小时" + (f" {m} 分钟" if m else "")
 
 
 def _plan_credentials():
@@ -114,10 +130,13 @@ def process_payload(payload):
         title, body = "⏸️ 任务等待你的确认", "ZCode 需要你批准一个操作，回电脑或微信里处理。"
     elif event == "Stop":
         turn_id = payload.get("turnId") or payload.get("turn_id")
-        status, _err = turn_status(turn_id)
+        status, _err, dur_ms = turn_status(turn_id)
         if status == "cancelled":
             return {"action": "skip", "reason": "turn cancelled by user", "session_id": session_id}
         title = "❌ 任务出错" if status == "error" else "✅ 任务完成"
+        dur = format_duration(dur_ms)
+        if dur:
+            title += f"（耗时 {dur}）"
         body = make_summary(payload.get("responsePreview") or payload.get("responseText") or "")
         if not body:
             body = f"回合已结束（{status or '状态未知'}）。"
