@@ -55,10 +55,16 @@ ZCode hooks（会话进程启动时加载，Stop/PermissionRequest/UserPromptSub
 
 **3. 添加群机器人，复制 Webhook 地址**
 
-- 进入刚建的群 → 右上角「···」→「群机器人」→「添加机器人」→ 新建；
-- 命名随意（如「ZCode 通知」）→ 创建后会显示一个 **Webhook 地址**，形如：
+- 入口因企业微信版本而异：旧版在 群 → 右上角「···」→「群机器人」→「添加机器人」→ 新建；新版手机端在 群 → 右上角「···」→「聊天信息」→ **「消息推送」**→「添加自定义消息推送」；
+- 命名随意（如「ZCode 通知」）→ 创建/保存后会显示一个 **Webhook 地址**，形如：
   `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxxxx-xxxx-xxxx`
 - 复制它，**这就是安装脚本要填的东西**。
+
+手机端实测路径（2026-09 版企业微信）：
+
+| 群「聊天信息」里的「消息推送」入口 | 「添加自定义消息推送」，点 Webhook 地址复制 |
+|---|---|
+| <img src="docs/images/wecom-step1-group-entry.png" width="270"> | <img src="docs/images/wecom-step2-add-webhook.png" width="270"> |
 
 **4. 先测一下能不能收到（可选但推荐）**
 
@@ -95,7 +101,9 @@ python install.py --webhook "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?ke
 
 ## 第三步：验证
 
-**在 ZCode 里新建一个会话**，随便发一句话。该会话回复结束时，企业微信应收到「✅ 任务完成」推送。
+**在 ZCode 里新建一个会话**，随便发一句话。该会话回复结束时，企业微信应收到「✅ 任务完成」推送，长这样（图为 `doctor.py` 的自检测试消息）：
+
+<img src="docs/images/wecom-test-success.jpg" width="380">
 
 > 为什么必须新建会话：hooks 配置在会话进程启动时加载，改动只对新会话生效（见下方「已知坑」第 1 条）。
 
@@ -121,19 +129,18 @@ python doctor.py                 # 含企业微信通道实测（会发一条测
 python doctor.py --no-send       # 静默检查，不发测试消息
 ```
 
-卸载（移除本工具注册的 hooks，保留其他配置并有备份；之后删除仓库目录即可）：
+卸载（移除本工具注册的 hooks，保留其他配置和已有 hook，并自动备份）：
 
 ```bash
 python install.py --uninstall
 ```
 
+之后删除仓库目录即可（无残留、无系统级安装）。若 `--uninstall` 不可用（比如手动改过配置），备选方案：
+
+1. 用 `%USERPROFILE%\.zcode\cli\config.json` 旁的备份文件（`config.json.bak-<时间戳>`）覆盖回去，或手动把 `hooks.events` 里 `args` 指向本工具 `scripts` 的条目删掉；
+2. （可选）进入企业微信群 → 群机器人/消息推送 → 移除机器人。
+
 安装时也可加 `--test` 让脚本装完立即发一条测试消息验证通道。
-
-## 卸载
-
-1. 删除 hooks：用 `%USERPROFILE%\.zcode\cli\config.json` 旁的备份文件（`config.json.bak-<时间戳>`）覆盖回去；或手动把 `hooks.events` 里 `args` 指向本工具 `scripts` 的条目删掉；
-2. 删除本仓库目录即可（无残留、无系统级安装）；
-3. （可选）进入企业微信群 → 群机器人 → 移除机器人。
 
 ## 已知坑与设计决策（实测踩出来的，重要）
 
