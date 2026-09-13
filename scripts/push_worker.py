@@ -121,6 +121,11 @@ def process_payload(payload):
     config = load_json(CONFIG_PATH, {})
     if not config.get("webhook"):
         return {"action": "skip", "reason": "no webhook", "session_id": session_id}
+    if event == "ConfigSelfHeal":
+        keys = "、".join(payload.get("removed_keys") or [])
+        return {"action": "push", "title": "🔧 hooks 配置自愈",
+                "body": f"检测到 config.json 顶层出现毒化键（{keys}），已自动备份并移除，通知功能恢复——对之后新开的会话生效。",
+                "event": event, "session_id": session_id}
     if session_id in bot_session_ids():
         return {"action": "skip", "reason": "bot session", "session_id": session_id}
     if session_id.startswith("sess_subagent"):

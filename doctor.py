@@ -101,6 +101,13 @@ def main():
     check("脚本文件存在", bool(find_file("notify.py")),
           "找不到 notify.py（检查目录布局）")
 
+    # 6.5 顶层键毒化检测：provider 键会让整个 hooks 静默失效（2026-09-13/14 两次实测）
+    check("config 顶层键无已知毒键", "provider" not in zcfg,
+          "顶层出现 provider 键——hooks 会被整体静默弃用（新会话的心跳 hook 会自动备份并移除；也可手动删除）")
+    unknown = [k for k in zcfg if k not in ("plugins", "hooks")]
+    if unknown:
+        check("config 未知顶层键", True, f"{unknown}（非已知毒键，仅提示关注）", warn=True)
+
     # 7. webhook 通道实测
     if webhook and send_test:
         try:

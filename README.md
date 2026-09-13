@@ -145,7 +145,7 @@ python install.py --uninstall
 ## 已知坑与设计决策（实测踩出来的，重要）
 
 1. **hooks 配置在会话的 agent 进程启动时读取一次，进程存活期不重读**。改配置后新会话立即生效，已启动的会话要等 ZCode 重启。测试新配置务必开全新会话，在老会话里测会得出"不生效"的错误结论。
-2. **`~/.zcode/cli/config.json` 对顶层键严格校验**：放入 hooks 以外的未知顶层键（如手工加的 `provider`）会导致 hooks 配置整体静默失效——没有任何报错，就是不执行。该文件只应有 `plugins`、`hooks` 等官方键。
+2. **`~/.zcode/cli/config.json` 对顶层键严格校验**：放入 hooks 以外的未知顶层键（如 `provider`）会导致 hooks 配置整体静默失效——没有任何报错，就是不执行（2026-09-14 实测复发：桌面端写入模型设置时把 `provider` 写回该文件顶层，重启后 hook 全部消失）。现已内置两级防护：`doctor.py` 第 13 项会检查毒键；**自愈机制**——每次用户提交消息时心跳 hook 检测到已知毒键会自动备份（`config.json.bak-*-selfheal`）、移除并推送「🔧 hooks 配置自愈」告知。该文件只应有 `plugins`、`hooks` 等官方键。
 3. **glm-4.5-flash 是思考模型**：v4 接口请求必须带 `"thinking": {"type": "disabled"}`，否则思考链吃光 `max_tokens`、正文为空且容易超时。
 4. **zcode-plan 端点（`zcode.z.ai/api/v1/zcode-plan/*`）有 captcha 防护**，脚本直调会返回 `{"code":3007,"msg":"captcha verify failed"}`——该通道仅限桌面端内部使用，外部脚本应走 open.bigmodel.cn 标准 v4 接口。
 5. **Stop hook 的 payload 没有成功/失败标志**，需按 `turnId` 查本地 `turn_usage` 表获取真实状态（`completed/error/cancelled`）。
