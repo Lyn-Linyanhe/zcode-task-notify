@@ -80,7 +80,6 @@ def main():
           and len(webhook) > 60, f"config（{cfg_path or '未找到'}）缺 webhook 或格式不对")
 
     # 6. hooks 注册
-    zcfg_path = target or ZCODE_CFG
     zcfg = load_json(zcode_cfg_path(target), {})
     hooks = zcfg.get("hooks") or {}
     events = hooks.get("events") or {}
