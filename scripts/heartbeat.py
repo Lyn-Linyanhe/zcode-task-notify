@@ -81,6 +81,36 @@ def is_bot_session(session_id):
                for b in items if isinstance(b, dict))
 
 
+def _lock_path(session_id):
+    import hashlib
+    return os.path.join(BASE, f"hb_lock_{hashlib.md5(session_id.encode()).hexdigest()[:12]}.lock")
+
+
+def _pid_alive(pid):
+    import ctypes
+    k32 = ctypes.windll.kernel32
+    h = k32.OpenProcess(0x1000, False, int(pid))  # QUERY_LIMITED_INFORMATION
+    if not h:
+        return False
+    k32.CloseHandle(h)
+    return True
+
+
+def acquire_lock(session_id, max_age_s):
+    """同会话单实例锁：已有活着的同会话心跳 → False（防多条「⏳」重复推送）。
+    锁的持有进程已死或超时（> 1.5x 最大跟踪时长）则接管。"""
+    import ctypes
+    path = _lock_path(session_id)
+    existing = load_json(path, {})
+    pid = existing.get("pid")
+    started = existing.get("started", 0)
+    if pid and _pid_alive(int(pid)) and time.time() - started < max_age_s * 1.5:
+        return False
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"pid": os.getpid(), "started": time.time()}, f)
+    return True
+
+
 def main():
     session_id = sys.argv[1] if len(sys.argv) > 1 else ""
     interval_sec = int(sys.argv[sys.argv.index("--interval-sec") + 1]) if "--interval-sec" in sys.argv else None
@@ -99,8 +129,11 @@ def main():
     if not webhook:
         return 0
 
+    if not acquire_lock(session_id, max_minutes):
+        hb_log({"ts": time.time(), "exit": "another heartbeat running", "session_id": session_id})
+        return 0
+
     hb_log({"ts": time.time(), "start": session_id, "interval_sec": interval_sec})
-    started = time.time()
     time.sleep(5)  # 等回合记录落库
 
     while True:

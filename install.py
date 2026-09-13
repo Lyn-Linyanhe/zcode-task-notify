@@ -38,11 +38,51 @@ def write_json(path, data):
         json.dump(data, f, ensure_ascii=False, indent=1)
 
 
+def uninstall(target):
+    zcode_cfg = os.path.join(target, ".zcode", "cli", "config.json")
+    existing = read_json(zcode_cfg, None)
+    if existing is None:
+        print(f"[warn] {zcode_cfg} 不存在，无需卸载")
+        return 0
+    hooks = existing.get("hooks") or {}
+    events = hooks.get("events") or {}
+    our_markers = ("notify.py", "heartbeat_spawn.py")
+    removed = 0
+    for event in list(events):
+        groups = events[event]
+        kept = [g for g in groups
+                if not any(any(m in str(a) for m in our_markers)
+                           for h in (g.get("hooks") or [])
+                           for a in ((h or {}).get("args") or []))]
+        removed += len(groups) - len(kept)
+        if kept:
+            events[event] = kept
+        else:
+            del events[event]
+    if removed:
+        if not events:
+            hooks.pop("events", None)
+            hooks["enabled"] = False
+        backup = zcode_cfg + ".bak-" + time.strftime("%Y%m%d-%H%M%S")
+        shutil.copy2(zcode_cfg, backup)
+        write_json(zcode_cfg, existing)
+        print(f"[ok] 已移除 {removed} 个本工具的 hook 条目（原配置备份: {backup}）")
+        print("[note] scripts/config.json 含 webhook 凭证，确认不再使用可手动删除")
+    else:
+        print("[ok] 没有找到本工具注册的 hooks")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--webhook", default="", help="企业微信群机器人 webhook 地址")
     ap.add_argument("--target", default=os.path.expanduser("~"), help=".zcode 所在根目录（默认用户主目录）")
+    ap.add_argument("--test", action="store_true", help="安装后向 webhook 发一条测试消息")
+    ap.add_argument("--uninstall", action="store_true", help="移除本工具注册的 hooks（保留其他配置）")
     args = ap.parse_args()
+
+    if args.uninstall:
+        return uninstall(args.target)
 
     # 1) 生成 scripts/config.json
     cfg_path = os.path.join(SCRIPTS_DIR, "config.json")
@@ -115,6 +155,21 @@ def main():
     existing["hooks"] = hooks
     write_json(zcode_cfg, existing)
     print(f"[ok] hooks 已写入 {zcode_cfg}（事件: {', '.join(HOOK_EVENTS)}；已有其他 hook 保留不动）")
+
+    # 4) 测试推送（可选）
+    cfg_now = read_json(cfg_path, {})
+    if args.test:
+        if str(cfg_now.get("webhook", "")).startswith("https://qyapi"):
+            sys.path.insert(0, SCRIPTS_DIR)
+            try:
+                from notify import send_wecom_once
+                ok, detail = send_wecom_once(cfg_now["webhook"], "🩺 安装成功",
+                                             "zcode-task-notify 已安装，任务通知将推送到这个群。")
+                print(f"[{'ok' if ok else 'FAIL'}] 测试推送: {detail}（看一眼企业微信群）")
+            except Exception as e:
+                print(f"[FAIL] 测试推送异常: {e}")
+        else:
+            print("[skip] --test 已指定但 webhook 为空，无法测试")
 
     print("""
 安装完成。接下来：

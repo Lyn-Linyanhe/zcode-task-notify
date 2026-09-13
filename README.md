@@ -112,6 +112,23 @@ python install.py --webhook "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?ke
 
 开关：`scripts/state.json` 的 `enabled` 字段（`true`/`false`）。
 
+## 自检与卸载
+
+收不到通知时，一条命令定位问题（12 项检查：Python 版本 / 桌面端运行 / 开关 / webhook 配置与通道实测 / hooks 注册 / 脚本完整性 / LLM key）：
+
+```bash
+python doctor.py                 # 含企业微信通道实测（会发一条测试消息）
+python doctor.py --no-send       # 静默检查，不发测试消息
+```
+
+卸载（移除本工具注册的 hooks，保留其他配置并有备份；之后删除仓库目录即可）：
+
+```bash
+python install.py --uninstall
+```
+
+安装时也可加 `--test` 让脚本装完立即发一条测试消息验证通道。
+
 ## 卸载
 
 1. 删除 hooks：用 `%USERPROFILE%\.zcode\cli\config.json` 旁的备份文件（`config.json.bak-<时间戳>`）覆盖回去；或手动把 `hooks.events` 里 `args` 指向本工具 `scripts` 的条目删掉；
