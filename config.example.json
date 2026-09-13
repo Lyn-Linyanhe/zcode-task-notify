@@ -1,0 +1,10 @@
+{
+  "webhook": "",
+  "use_llm_summary": false,
+  "llm_api_format": "openai",
+  "llm_base_url": "https://open.bigmodel.cn/api/paas/v4",
+  "llm_model": "glm-4.5-flash",
+  "llm_api_key": "",
+  "heartbeat_interval_min": 30,
+  "heartbeat_max_hours": 4
+}

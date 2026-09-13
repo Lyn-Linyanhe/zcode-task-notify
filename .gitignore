@@ -1,0 +1,16 @@
+# 凭证与隐私（绝不提交）
+config.json
+state.json
+pending/
+notify_log.jsonl
+push_failures.log
+heartbeat_log.jsonl
+usp_probe.jsonl
+probe_dump.json
+hook_fired.txt
+*.bak*
+
+# Python
+__pycache__/
+*.pyc
+.venv/

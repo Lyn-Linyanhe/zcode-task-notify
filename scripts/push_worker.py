@@ -1,0 +1,164 @@
+"""推送 worker：由 notify.py 分离启动，完成全部耗时逻辑。
+
+流程：读 payload 文件 → 过滤（bot/子代理/开关二次确认）→ 查 turn 真实状态
+     → 摘要（可选 LLM 增强，失败自动回退启发式）→ 企业微信推送（带重试）→ 清理。
+"""
+import json
+import os
+import sqlite3
+import sys
+import time
+import urllib.request
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, BASE)
+from notify import (load_json, log, make_summary, send_wecom,  # noqa: E402
+                    get_session_title, CONFIG_PATH, STATE_PATH, SESSION_DB, MAX_SUMMARY)
+
+SUMMARY_SYSTEM = ("把 AI 助手的任务回复压缩成一条微信通知摘要：一句话说清做了什么和结果，"
+                  "60字以内，直接给内容，不要客套和markdown，保留关键数字。"
+                  "如果回复是创作内容（小说/文案等），给出作品标题和一句话内容亮点。")
+
+
+def bot_session_ids():
+    bots = load_json(os.path.expanduser("~/.zcode/v2/bot-state.v2.json"), {}).get("bots")
+    items = bots.values() if isinstance(bots, dict) else (bots or [])
+    return {b["activeTaskId"] for b in items if isinstance(b, dict) and b.get("activeTaskId")}
+
+
+def turn_status(turn_id):
+    if not turn_id:
+        return None, None
+    try:
+        con = sqlite3.connect(SESSION_DB, timeout=3)
+        row = con.execute("SELECT status, error_code FROM turn_usage WHERE turn_id=?", (turn_id,)).fetchone()
+        con.close()
+        return (row[0], row[1]) if row else (None, None)
+    except Exception:
+        return None, None
+
+
+def _plan_credentials():
+    """动态读取桌面端 start-plan 凭证（JWT 随桌面端自动刷新，读最新的）。"""
+    try:
+        prov = load_json(os.path.expanduser("~/.zcode/v2/config.json"), {}).get("provider", {})
+        opts = (prov.get("builtin:bigmodel-start-plan") or {}).get("options") or {}
+        return opts.get("apiKey"), opts.get("baseURL")
+    except Exception:
+        return None, None
+
+
+def llm_summary(text, cfg):
+    """LLM 摘要。支持 anthropic（start-plan 通道，默认零配置）与 openai 两种格式。
+    未启用/凭证缺失/任何失败 → 返回 None（调用方回退启发式）。"""
+    if not cfg.get("use_llm_summary"):
+        return None
+    text = (text or "")[:2000]
+    if not text:
+        return None
+
+    fmt = cfg.get("llm_api_format") or "anthropic"
+    key, base, model = cfg.get("llm_api_key"), cfg.get("llm_base_url"), cfg.get("llm_model")
+    if fmt == "anthropic" and (not key or not base):
+        key, base = _plan_credentials()
+        base = (base or "https://zcode.z.ai/api/v1/zcode-plan/anthropic").rstrip("/")
+        model = model or "glm-5.3-flash"
+    if not key:
+        return None
+
+    try:
+        if fmt == "anthropic":
+            url = base + "/v1/messages"
+            body = {"model": model, "max_tokens": 150, "system": SUMMARY_SYSTEM,
+                    "messages": [{"role": "user", "content": text}]}
+            headers = {"Content-Type": "application/json", "x-api-key": key,
+                       "Authorization": "Bearer " + key, "anthropic-version": "2023-06-01"}
+        else:
+            url = base.rstrip("/") + "/chat/completions"
+            body = {"model": model, "max_tokens": 300,
+                    "messages": [{"role": "user",
+                                  "content": SUMMARY_SYSTEM + "\n\n回复内容：\n" + text}],
+                    "thinking": {"type": "disabled"}}
+            headers = {"Content-Type": "application/json", "Authorization": "Bearer " + key}
+        resp = json.loads(urllib.request.urlopen(
+            urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers),
+            timeout=25).read())
+        if fmt == "anthropic":
+            out = "".join(c.get("text", "") for c in resp.get("content", []) if c.get("type") == "text")
+        else:
+            msg = resp["choices"][0]["message"]
+            out = (msg.get("content") or "").strip() or (msg.get("reasoning_content") or "").strip()
+        return out[:MAX_SUMMARY] or None
+    except Exception as e:
+        log({"ts": time.time(), "llm_error": str(e)[:150]})
+        return None
+
+
+def process_payload(payload):
+    """决策 + 组装。返回 {'action':'skip','reason'} 或 {'action':'push','title','body','event','session_id'}。"""
+    event = payload.get("hookEventName") or payload.get("hook_event_name") or "?"
+    session_id = payload.get("session_id") or payload.get("sessionId") or "?"
+
+    state = load_json(STATE_PATH, {"enabled": True})
+    if not state.get("enabled", True):
+        return {"action": "skip", "reason": "switch off", "session_id": session_id}
+    config = load_json(CONFIG_PATH, {})
+    if not config.get("webhook"):
+        return {"action": "skip", "reason": "no webhook", "session_id": session_id}
+    if session_id in bot_session_ids():
+        return {"action": "skip", "reason": "bot session", "session_id": session_id}
+    if session_id.startswith("sess_subagent"):
+        return {"action": "skip", "reason": "subagent", "session_id": session_id}
+
+    if event == "PermissionRequest":
+        title, body = "⏸️ 任务等待你的确认", "ZCode 需要你批准一个操作，回电脑或微信里处理。"
+    elif event == "Stop":
+        turn_id = payload.get("turnId") or payload.get("turn_id")
+        status, _err = turn_status(turn_id)
+        if status == "cancelled":
+            return {"action": "skip", "reason": "turn cancelled by user", "session_id": session_id}
+        title = "❌ 任务出错" if status == "error" else "✅ 任务完成"
+        body = make_summary(payload.get("responsePreview") or payload.get("responseText") or "")
+        if not body:
+            body = f"回合已结束（{status or '状态未知'}）。"
+    else:
+        title, body = f"🔔 {event}", json.dumps(payload, ensure_ascii=False)[:150]
+
+    return {"action": "push", "title": f"{title}｜{get_session_title(session_id)}",
+            "body": body, "event": event, "session_id": session_id}
+
+
+def main():
+    if len(sys.argv) < 2:
+        return 0
+    payload_path = sys.argv[1]
+    payload = load_json(payload_path, {})
+    try:
+        os.remove(payload_path)
+    except Exception:
+        pass
+    if not payload:
+        return 0
+
+    result = process_payload(payload)
+    if result["action"] == "skip":
+        log({"ts": time.time(), "skipped": result["reason"], "session_id": result.get("session_id")})
+        return 0
+
+    config = load_json(CONFIG_PATH, {})
+    body = result["body"]
+    if result["event"] == "Stop":
+        llm = llm_summary(payload.get("responsePreview") or payload.get("responseText") or "", config)
+        if llm:
+            body = llm
+            log({"ts": time.time(), "llm_summary_used": True, "session_id": result["session_id"]})
+
+    final = f"{body}\n> {time.strftime('%H:%M')} · {result['session_id'][:16]}"
+    ok, detail = send_wecom(config["webhook"], result["title"], final)
+    log({"ts": time.time(), "pushed": ok, "detail": detail[:200],
+         "session_id": result["session_id"], "title": result["title"]})
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
