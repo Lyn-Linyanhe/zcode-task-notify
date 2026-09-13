@@ -35,20 +35,54 @@ ZCode hooks（会话进程启动时加载，Stop/PermissionRequest/UserPromptSub
 - Windows 10/11（使用了 Win32 进程枚举与分离进程 API）
 - ZCode 桌面端 **3.11.2+**（hooks schema 在此版本验证）
 - Python 3.10+（仅标准库，无第三方依赖）
-- 一个企业微信群机器人 webhook（免费，见下）
+- 手机安装**企业微信 App**（接收通知的终点）
+- 一个企业微信群机器人 webhook（免费，获取步骤见下）
 
-## 安装
+## 第一步：获取企业微信 Webhook（免费，约 5 分钟）
 
-1. 建一个企业微信群机器人：企业微信 App 建群（可以只有你自己）→ 群设置 → 群机器人 → 添加 → 复制 Webhook 地址；
-2. clone 本仓库，运行安装脚本：
+> 企业微信 = 腾讯面向企业的办公 App，**个人使用完全免费**：无需营业执照、无需企业认证、无需付费。通知会发到企业微信 App，不是个人微信——这是"不花钱、不限量、不封号"的代价。
+
+**1. 注册并下载企业微信**
+
+- 电脑访问 [work.weixin.qq.com](https://work.weixin.qq.com) 点「立即注册」，或手机应用商店直接搜索「企业微信」下载；
+- 注册只需手机号 + 填一个企业名称（个人使用随便填，如「我的通知」），**不需要认证**；
+- 注册完成后，在**手机**上登录企业微信 App——通知最终推送到这里。
+
+**2. 建一个群**
+
+- 企业微信 App → 消息页 → 右上角「+」→ 发起群聊；
+- 如果提示「至少选择一名成员」（新账号没有同事时常见），先拉一位家人/朋友进群，**建好后把对方移出即可**——群不会因此解散，机器人继续可用。
+
+**3. 添加群机器人，复制 Webhook 地址**
+
+- 进入刚建的群 → 右上角「···」→「群机器人」→「添加机器人」→ 新建；
+- 命名随意（如「ZCode 通知」）→ 创建后会显示一个 **Webhook 地址**，形如：
+  `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxxxx-xxxx-xxxx`
+- 复制它，**这就是安装脚本要填的东西**。
+
+**4. 先测一下能不能收到（可选但推荐）**
+
+在 Windows PowerShell 里执行（把地址换成你的）：
+
+```powershell
+Invoke-RestMethod -Uri "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的key" -Method Post -ContentType "application/json" -Body '{"msgtype":"text","text":{"content":"测试消息"}}'
+```
+
+手机企业微信收到「测试消息」即通道打通。返回 `{"errcode":0,"errmsg":"ok"}` 同样代表成功。
+
+> ⚠️ Webhook 地址等同「往这个群发消息的钥匙」，**不要发到公开场合**或提交到 git（本仓库的 .gitignore 已排除含 key 的 config.json）。
+
+## 第二步：安装
+
+clone 本仓库后运行安装脚本（webhook 用第一步拿到的地址）：
 
 ```bash
 python install.py --webhook "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的key"
 ```
 
-脚本会：生成 `scripts/config.json` 与开关文件、**自动备份并合并** hooks 配置到 `%USERPROFILE%\.zcode\cli\config.json`（只动 `hooks` 键，不碰其他配置）。
+脚本会：生成 `scripts/config.json` 与开关文件、**自动备份并合并** hooks 配置到 `%USERPROFILE%\.zcode\cli\config.json`（只改 `hooks` 键，其他配置原样保留，并有带时间戳的备份）。
 
-3. （可选）接入 LLM 摘要：在 [bigmodel.cn 控制台](https://bigmodel.cn/console/usercenter/apikeys) 创建一个 API Key，然后编辑 `scripts/config.json`：
+**（可选）接入 LLM 摘要**：在 [bigmodel.cn 控制台](https://bigmodel.cn/console/usercenter/apikeys) 创建一个 API Key（免费注册），然后编辑 `scripts/config.json`：
 
 ```json
 {
@@ -59,7 +93,11 @@ python install.py --webhook "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?ke
 }
 ```
 
-4. **在 ZCode 里新建一个会话**测试（hooks 配置在会话进程启动时加载，改动只对新会话生效）。
+## 第三步：验证
+
+**在 ZCode 里新建一个会话**，随便发一句话。该会话回复结束时，企业微信应收到「✅ 任务完成」推送。
+
+> 为什么必须新建会话：hooks 配置在会话进程启动时加载，改动只对新会话生效（见下方「已知坑」第 1 条）。
 
 ## 配置项（`scripts/config.json`）
 
