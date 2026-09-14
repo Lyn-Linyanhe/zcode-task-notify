@@ -26,9 +26,7 @@ def bot_session_ids():
     return {b["activeTaskId"] for b in items if isinstance(b, dict) and b.get("activeTaskId")}
 
 
-def turn_status(turn_id):
-    if not turn_id:
-        return None, None, None
+def _query_turn(turn_id):
     try:
         con = sqlite3.connect(SESSION_DB, timeout=3)
         row = con.execute("SELECT status, error_code, duration_ms FROM turn_usage WHERE turn_id=?",
@@ -37,6 +35,19 @@ def turn_status(turn_id):
         return (row[0], row[1], row[2]) if row else (None, None, None)
     except Exception:
         return None, None, None
+
+
+def turn_status(turn_id, wait_s=5):
+    """查回合状态。Stop hook 触发时 turn_usage 行常仍是 running（completed_at/duration_ms
+    在回合完全结束后才补写）——轮询至多 wait_s 秒，拿到终态再返回，否则耗时/取消判定失效。"""
+    if not turn_id:
+        return None, None, None
+    deadline = time.time() + wait_s
+    status, err, dur = _query_turn(turn_id)
+    while status == "running" and time.time() < deadline:
+        time.sleep(0.5)
+        status, err, dur = _query_turn(turn_id)
+    return status, err, dur
 
 
 def format_duration(ms):

@@ -112,9 +112,29 @@ python install.py --webhook "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?ke
 
 权限请求发生时，手机企业微信收到一张带「✅ 批准 / ❌ 拒绝」按钮的卡片，点一下即放行或拦截；120 秒不操作自动回退到电脑上的正常确认弹窗。基于企业微信「智能机器人」**长连接**（免费、无需公网服务器），与上面的群机器人通知互相独立、互不影响。
 
-1. 手机企业微信 → 工作台 → 智能机器人 → 创建机器人 → 选 **API 模式** → **使用长连接** → 点「随机获取」生成 Secret → **保存**；
-2. `python install.py --aibot --bot-id "..." --bot-secret "..."`（两者在 机器人详情 → API设置 页复制）；
-3. 给这个机器人**发一条单聊消息**（如"你好"）——连接器自动捕获你的推送地址并就绪。
+**第一步：创建智能机器人**（手机企业微信，约 2 分钟）
+
+1. 底部「**通讯录**」→ 顶部「**智能机器人**」→ 右上角「**创建**」→「**创建智能机器人**」：
+
+| 1+2. 通讯录 → 智能机器人 | 3. 右上角「创建」 | 4. 创建智能机器人 |
+|---|---|---|
+| <img src="docs/images/aibot-flow1-contacts-entry.png" width="240"> | <img src="docs/images/aibot-flow2-robot-list.png" width="240"> | <img src="docs/images/aibot-flow3-create-entry.png" width="240"> |
+
+2. 在配置页选 **API 模式** + **使用长连接** → 点「随机获取」生成 Secret → **保存**；进入 机器人详情 → **API设置** 复制 Bot ID 和 Secret：
+
+| 5. API 模式 + 长连接 | 6. 复制 Bot ID / Secret |
+|---|---|
+| <img src="docs/images/aibot-flow4-api-mode.png" width="240"> | <img src="docs/images/aibot-flow5-credentials.png" width="240"> |
+
+**第二步：装到电脑上**
+
+```bash
+python install.py --aibot --bot-id "aib..." --bot-secret "..."
+```
+
+**第三步：激活**——给这个机器人**发一条单聊消息**（如"你好"），连接器自动捕获你的推送地址并就绪。
+
+之后在单聊里发「静默 / 恢复 / 状态」还能遥控整个通知系统。
 
 运行机制：权限请求 → hook 经本地连接器（`127.0.0.1:17899`）发卡片 → 你点按钮 → 决定回写给 hook → ZCode 继续/停止，卡片同时原位变成结果卡并锁定。连接器由心跳 hook 看门狗守护（发消息时自动拉起），断线由 SDK 自动重连。安全边界：卡片只发你自己的单聊；决定文件仅存本地且 15 分钟过期；webhook 通知与按钮决策互为降级（连接器不在线时自动退回普通 ⏸️ 通知）。
 
