@@ -224,10 +224,14 @@ async def on_card_click(frame):
             json.dump({"decision": decision, "ts": time.time()}, f)
         label = "✅ 已批准" if decision == "allow" else "❌ 已拒绝"
         try:
+            # 官方要求：更新时保持 card_type 不变（button_interaction），
+            # 把按钮改为完成态文案；换 text_notice 会报 42045
             await ws.update_template_card(frame, {
-                "card_type": "text_notice",
-                "main_title": {"title": f"{label}（手机决定）"},
-                "sub_title_text": "决定已同步给 ZCode，此卡片已锁定",
+                "card_type": "button_interaction",
+                "main_title": {"title": f"{label}（手机决定）",
+                               "desc": "决定已同步给 ZCode"},
+                "button_list": [{"key": key or "done",
+                                 "text": label, "style": 1 if decision == "allow" else 2}],
                 "task_id": task_id,
             })
         except Exception as e:
