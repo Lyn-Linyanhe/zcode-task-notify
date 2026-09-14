@@ -133,7 +133,12 @@ async def on_text(frame):
         if reply_text:
             log({"ts": time.time(), "aibot_cmd": content[:10]})
             try:
-                await ws.reply(frame, {"msgtype": "text", "text": {"content": reply_text}})
+                # 长连接模式没有 text 类型：普通（一次性）回复也必须走流式结构——
+                # msgtype=stream + finish=true，否则企业微信回执 40008 invalid message type
+                # （2026-09-14 实测：「状态」指令能收到但回复被退回）
+                await ws.reply_stream(
+                    frame, f"stream_{int(time.time() * 1000)}_{os.getpid()}",
+                    reply_text, finish=True)
             except Exception as e:
                 log({"ts": time.time(), "error": f"cmd reply: {e}"})
             return
