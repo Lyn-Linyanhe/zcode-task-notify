@@ -148,14 +148,17 @@ def send_wecom(webhook, title, summary):
 
 
 def _try_aibot(title, summary):
-    """机器人通道：连接器 /notify 在线且已捕获目标 → True。任何异常静默 False。"""
+    """机器人通道：连接器 /notify 在线且已捕获目标 → (True, "ok")，否则 (False, 原因)。
+    原因会写进降级提示里，方便一眼看出是没配置、没绑用户还是连接器挂了。"""
     try:
         cfg_path = os.path.join(BASE, "aibot_config.json")
         if not os.path.exists(cfg_path):
-            return False
+            return False, "未配置智能机器人"
         cfg = load_json(cfg_path, {})
-        if not cfg.get("bot_id") or not cfg.get("target_userid"):
-            return False
+        if not cfg.get("bot_id"):
+            return False, "未配置智能机器人"
+        if not cfg.get("target_userid"):
+            return False, "未绑定用户（先在微信里给机器人发一条消息）"
         port = int(cfg.get("local_port", 17899))
         body = {"title": title, "content": f"**{title}**\n{summary}"}
         req = urllib.request.Request(
@@ -163,20 +166,27 @@ def _try_aibot(title, summary):
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
             headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=3) as resp:
-            return json.loads(resp.read().decode("utf-8")).get("ok") is True
+            if json.loads(resp.read().decode("utf-8")).get("ok") is True:
+                return True, "ok"
+            return False, "连接器拒绝了本条推送"
     except Exception:
-        return False
+        return False, "连接器离线"
 
 
 def send_notification(webhook, title, summary):
     """统一推送入口：智能机器人（单聊）优先，连接器不可用降级群 webhook。
+    走降级通道时在正文里显式标注原因——群机器人只能单向通知，回复指令/点按钮都无效，
+    不标注的话"机器人挂了"会被误当成"通知正常"。
     返回 (是否成功, 通道名, 详情)。"""
-    if _try_aibot(title, summary):
+    ok_aibot, reason = _try_aibot(title, summary)
+    if ok_aibot:
         return True, "aibot", "ok"
     if webhook:
-        ok, detail = send_wecom(webhook, title, summary)
+        note = (f"> ⚠️ **通道降级**：智能机器人不可用（{reason}），本条由群机器人代发。"
+                "群机器人只能单向通知，回复指令或点按钮需等智能机器人恢复。")
+        ok, detail = send_wecom(webhook, title, f"{summary}\n{note}")
         return ok, "webhook", detail
-    log_failure(f"推送失败（无可用通道：aibot 不在线且未配 webhook）| {title}")
+    log_failure(f"推送失败（无可用通道：aibot 不可用（{reason}）且未配 webhook）| {title}")
     return False, "none", "no channel"
 
 
@@ -243,7 +253,7 @@ def main():
     try:
         subprocess.Popen(
             [sys.executable, os.path.join(BASE, "push_worker.py"), temp_path],
-            creationflags=0x00000008 | 0x00000200,  # DETACHED | NEW_GROUP
+            creationflags=0x08000000 | 0x00000200,  # CREATE_NO_WINDOW | NEW_GROUP
             cwd=BASE, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
     except Exception as e:

@@ -13,7 +13,7 @@
 - **三类事件推送**：任务完成 ✅ / 任务出错 ❌ / 等待确认 ⏸️，完成与出错的标题带任务耗时（按本地数据库的回合真实状态区分，取消不推）
 - **手机批准/拒绝**（可选）：权限请求推到手机，点「批准/拒绝」按钮直接放行或拦截，人不在电脑前也能处理（企业微信智能机器人长连接，同样免费）
 - **LLM 语义摘要**：默认接 GLM-4.5-Flash（免费模型）生成一句话摘要，能理解创作类内容；未配置或调用失败自动回退内置启发式提取
-- **长任务心跳**：回合运行超过 30 分钟自动推「⏳ 仍在运行」，结束自动停止，防误报
+- **长任务心跳**：回合运行超过 30 分钟自动推「⏳ 仍在运行」（按 payload 的 `turnId` 精确盯本轮，见已知坑 9），回合结束自动退出，防误报
 - **手动开关**：给机器人发「静默/恢复/状态」即可全量静默/恢复（未启用手机批准时改 `state.json`）
 - **智能过滤**：微信 Bot 会话不重复推送；子代理会话过滤；推送失败自动重试并落失败日志
 
@@ -24,11 +24,11 @@ ZCode hooks（会话进程启动时加载，Stop/PermissionRequest/UserPromptSub
 ├─ notify.py        hook 入口：秒回，落盘 payload，分离进程启动 worker
 │     └─ push_worker.py
 │          ├─ 过滤：开关 / 微信Bot会话 / 子代理会话
-│          ├─ 状态：查 turn_usage 表，区分 ✅完成 / ❌出错 / ⏹️已取消(静默)
+│          ├─ 状态：查 turn_usage 表（等回合行落库，上限 stop_status_wait_sec），区分 ✅完成 / ❌出错 / ⏹️已取消(静默)
 │          ├─ 摘要：LLM（GLM-4.5-Flash，失败自动回退启发式提取）
-│          └─ 推送：企业微信群机器人 webhook（失败重试 1 次）
-└─ heartbeat_spawn.py → heartbeat.py（分离进程）
-       └─ 心跳循环：回合未结束且超间隔 → 推「⏳ 仍在运行」；结束即退出
+│          └─ 推送：智能机器人单聊优先，降级时走企业微信群机器人 webhook（失败重试 1 次，降级消息带 ⚠️ 标注）
+└─ heartbeat_spawn.py → heartbeat.py（分离进程，带上 payload 的 turnId）
+       └─ 心跳循环：本轮未结束且到间隔 → 推「⏳ 仍在运行」；本轮落库即退出
 ```
 
 ## 环境要求
@@ -144,7 +144,9 @@ python install.py --aibot --bot-id "aib..." --bot-secret "..."
 
 > 卡片决策同样只对**新会话**生效（见已知坑 1）。
 
-**统一通知通道（启用手机批准后）**：所有通知（✅❌⏸️⏳）自动优先走智能机器人单聊（一个消息来源，干净），连接器不在线时**自动降级**回群 webhook，通知永不静默丢失；群 webhook 出现「降级消息」本身就等于报警。未启用 aibot 的用户行为不变（纯 webhook）。
+**统一通知通道（启用手机批准后）**：所有通知（✅❌⏸️⏳）自动优先走智能机器人单聊（一个消息来源，干净），连接器不在线时**自动降级**回群 webhook，通知永不静默丢失。
+
+降级时消息末尾会自带一行提示（形如 `> ⚠️ 通道降级：智能机器人不可用（连接器离线），本条由群机器人代发…`），写明原因（未配置 / 未绑定用户 / 连接器离线 / 连接器拒绝），并提醒**群机器人只能单向通知、回复指令或点按钮无效**——所以"看到降级提示"本身就是报警，不用另设监控。未启用 aibot 的用户行为不变（纯 webhook）。
 
 ## 配置项（`scripts/config.json`）
 
@@ -156,6 +158,7 @@ python install.py --aibot --bot-id "aib..." --bot-secret "..."
 | `llm_model` | `glm-4.5-flash` | 摘要模型（免费） |
 | `heartbeat_interval_min` | `30` | 心跳间隔（分钟） |
 | `heartbeat_max_hours` | `4` | 心跳最长跟踪时长（小时） |
+| `stop_status_wait_sec` | `60` | 回合结束后最多等多少秒让 `turn_usage` 行落库（拿到耗时与真实状态；见已知坑 5） |
 
 开关：`scripts/state.json` 的 `enabled` 字段（`true`/`false`）；启用手机批准（见进阶章节）后，直接给机器人发「静默」「恢复」「状态」即可遥控开关。
 
@@ -187,10 +190,11 @@ python install.py --uninstall
 2. **`~/.zcode/cli/config.json` 对顶层键严格校验**：放入 hooks 以外的未知顶层键（如 `provider`）会导致 hooks 配置整体静默失效——没有任何报错，就是不执行（2026-09-14 实测复发：桌面端写入模型设置时把 `provider` 写回该文件顶层，重启后 hook 全部消失）。现已内置两级防护：`doctor.py` 第 13 项会检查毒键；**自愈机制**——每次用户提交消息时心跳 hook 检测到已知毒键会自动备份（`config.json.bak-*-selfheal`）、移除并推送「🔧 hooks 配置自愈」告知。该文件只应有 `plugins`、`hooks` 等官方键。
 3. **glm-4.5-flash 是思考模型**：v4 接口请求必须带 `"thinking": {"type": "disabled"}`，否则思考链吃光 `max_tokens`、正文为空且容易超时。
 4. **zcode-plan 端点（`zcode.z.ai/api/v1/zcode-plan/*`）有 captcha 防护**，脚本直调会返回 `{"code":3007,"msg":"captcha verify failed"}`——该通道仅限桌面端内部使用，外部脚本应走 open.bigmodel.cn 标准 v4 接口。
-5. **Stop hook 的 payload 没有成功/失败标志**，需按 `turnId` 查本地 `turn_usage` 表获取真实状态（`completed/error/cancelled`）。
+5. **Stop hook 的 payload 没有成功/失败标志**，需按 `turnId` 查本地 `turn_usage` 表获取真实状态（`completed/error/cancelled`）。**而且那一行是回合彻底结束后才整体写入的**：Stop hook 触发的瞬间它通常还不存在（`duration_ms`、`error_code` 同批写入）。所以查询必须"等行出现"——只判 `status == "running"` 会在行缺失时一次都不等就返回，后果是**耗时永远为空、出错永远显示 ✅、取消永远不跳过**（2026-09-14 实测 46 条推送无一例外，同日修复）。等待上限由 `stop_status_wait_sec` 控制，取不到就降级为"无耗时"照常推送，绝不因为查不到而丢通知；每次判定都写进 `notify_log.jsonl` 的 `turn_status`/`duration_ms`/`waited_s` 字段备查。
 6. 企业微信**群机器人 webhook 是单向通道**（通知只能看不能点）；双向交互（手机批准/拒绝）走的是另一条通道——智能机器人长连接（见「进阶：手机批准/拒绝」），两者互不影响。
 7. **智能机器人长连接没有 `text` 消息类型**：连"一次性回复"也必须用流式结构 `{"msgtype":"stream","stream":{"id":…,"finish":true,"content":…}}`（SDK 里即 `ws.reply_stream(...)`）。写成 `{"msgtype":"text",…}` 会被拒 `40008 invalid message type`，现象是**「静默/恢复/状态」收到了但机器人不回话**——入站日志 `aibot_cmd` 有记录，紧跟一条 40008。v1.2.2 已修。
 8. **卡片原位更新必须保持 `card_type=button_interaction`**：想换成 `text_notice` 会报 `42045 Template_Card card_action Missing or Invalid`，卡片纹丝不动。代价是结果卡上的按钮**依然可以再点**，所以 `on_card_click` 做了幂等——同一 `task_id` 只认第一次决定，重复点击只留一条 `decision_dup` 日志。另外决定文件有 **15 分钟 TTL**（`cleanup_decisions`），隔很久再点旧卡会被当成新决定。
+9. **长任务心跳必须盯 payload 里的 `turnId` 那一行，不能看"该会话最新一行"**：因为行是回合结束后才写入的（见坑 5），"最新一行"永远是**上一个已结束的回合**，于是心跳每次启动都秒退——长任务提醒形同虚设（2026-09-14 实测 52 次启动、45 次秒退、⏳ 推送 0 次）。正确判据是：**该 turnId 的行不存在 = 本轮还在跑**（起点用心跳自己的启动时刻），行出现且终态 = 结束。另注意 ⏳ 必须**先等满一个间隔再推**，否则每条消息都会立刻收到一条"仍在运行"。
 
 ## 故障排查
 
@@ -202,6 +206,9 @@ python install.py --uninstall
 | LLM 摘要没生效 | 看 `notify_log.jsonl` 的 `llm_error`；确认 `llm_api_key` 有效、未超免费限速 |
 | 权限卡片没推到手机 | ① **人在电脑前就不会推**（键鼠 60 秒内有活动即走桌面弹窗，见「进阶」章节）；② 确认给机器人发过一条单聊消息（`notify_log.jsonl` 应有 `target_captured`，或 `doctor.py` 第 16 项"连接器在线"为 PASS）；③ 查 `notify_log.jsonl` 有没有 `card_sent`——没有说明连接器不在线，此时会自动降级成 ⏸️ webhook 通知 |
 | 给机器人发指令（静默/恢复/状态）没反应 | 查 `notify_log.jsonl`：有 `aibot_cmd` 但紧跟 `errmsg=invalid message type`/`40008` = 回复格式问题（见坑 7，升到 v1.2.2 即修）；连 `aibot_cmd` 都没有 = 消息没进来（确认机器人在线、且消息发给了这个机器人） |
+| 通知标题里没有耗时 | 看 `notify_log.jsonl` 里该条的 `turn_status` / `duration_ms` / `waited_s`：`duration_ms` 为 `null` = 等满 `stop_status_wait_sec` 行仍未落库（可调大该值）；`duration_ms` 有值但不足 10 秒 = 刻意不标（见坑 5） |
+| 推送末尾出现「⚠️ 通道降级」 | 这是设计内的报警：智能机器人不可用，括号里写了原因（未配置/未绑定用户/连接器离线/连接器拒绝）。此时消息由群机器人代发，**回复指令和点卡片按钮都无效**；按进阶章节把连接器恢复即可 |
+| 长任务跑很久也没收到 ⏳ | 看 `heartbeat_log.jsonl`：`start` 后紧跟 `exit: "turn finished"` = 把本轮误判成已结束（见坑 9）；`no turn id in payload` = 这次提交流程没带回合号（心跳宁可不推）；`another heartbeat running` = 同会话已有心跳在跟踪，属正常去重 |
 
 ## License
 

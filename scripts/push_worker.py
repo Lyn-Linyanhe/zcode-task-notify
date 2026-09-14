@@ -37,14 +37,22 @@ def _query_turn(turn_id):
         return None, None, None
 
 
-def turn_status(turn_id, wait_s=5):
-    """查回合状态。Stop hook 触发时 turn_usage 行常仍是 running（completed_at/duration_ms
-    在回合完全结束后才补写）——轮询至多 wait_s 秒，拿到终态再返回，否则耗时/取消判定失效。"""
+TERMINAL = ("completed", "error", "cancelled")
+
+
+def turn_status(turn_id, wait_s=0):
+    """查回合状态，必要时等待它落库。
+
+    Stop hook 触发时 turn_usage 里通常**还没有本回合的行**：那行是回合彻底结束后才整体
+    写入的（含 duration_ms / error_code）。所以除了等 running 变终态，更要等"行出现"。
+    只判 `status == "running"` 会在行缺失（None）时一次都不等就返回，导致耗时显示、
+    出错识别、取消跳过全部失效——2026-09-14 实测 46 条推送无一带耗时、无一条 ❌。
+    """
     if not turn_id:
         return None, None, None
-    deadline = time.time() + wait_s
+    deadline = time.time() + max(0.0, float(wait_s))
     status, err, dur = _query_turn(turn_id)
-    while status == "running" and time.time() < deadline:
+    while status not in TERMINAL and time.time() < deadline:
         time.sleep(0.5)
         status, err, dur = _query_turn(turn_id)
     return status, err, dur
@@ -148,7 +156,11 @@ def process_payload(payload):
         title, body = "⏸️ 任务等待你的确认", "ZCode 需要你批准一个操作，回电脑或微信里处理。"
     elif event == "Stop":
         turn_id = payload.get("turnId") or payload.get("turn_id")
-        status, _err, dur_ms = turn_status(turn_id)
+        t0 = time.time()
+        status, _err, dur_ms = turn_status(turn_id, wait_s=config.get("stop_status_wait_sec", 60))
+        # 诊断：这条能区分「行还没落库」和「真没耗时」，排查耗时/❌ 缺失时先看它
+        log({"ts": time.time(), "turn_status": status, "duration_ms": dur_ms,
+             "waited_s": round(time.time() - t0, 1), "session_id": session_id})
         if status == "cancelled":
             return {"action": "skip", "reason": "turn cancelled by user", "session_id": session_id}
         title = "❌ 任务出错" if status == "error" else "✅ 任务完成"
