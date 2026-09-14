@@ -121,9 +121,10 @@ def main():
         return 0
 
     # 分离进程启动心跳
+    turn_id = payload.get("turnId") or payload.get("turn_id") or ""
     try:
         subprocess.Popen(
-            [sys.executable, os.path.join(BASE, "heartbeat.py"), session_id],
+            [sys.executable, os.path.join(BASE, "heartbeat.py"), session_id, "--turn-id", turn_id],
             creationflags=NOWINDOW, cwd=BASE,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True)

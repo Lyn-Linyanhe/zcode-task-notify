@@ -1,23 +1,31 @@
-"""长任务心跳：会话的回合运行超过间隔时，推送"仍在运行"提醒。
+"""长任务心跳：回合运行超过间隔时，推送"仍在运行"提醒。
 
-用法: python heartbeat.py <session_id> [--interval-sec N] [--max-minutes N]
+用法: python heartbeat.py <session_id> [--turn-id T] [--interval-sec N] [--max-minutes N]
 由 heartbeat_spawn.py 在 UserPromptSubmit hook 中以分离进程方式启动。
-退出条件：回合结束（Stop hook 负责推送结果）/ 桌面端进程消失 / 达到时长上限。
+
+盯的是 payload 里的 turnId 那一行，而不是"该会话最新一行"——turn_usage 的行是回合
+**结束后**才整体写入的，所以：
+  - 行不存在   = 回合还在跑（此时用心跳自己的启动时刻当起点估算）
+  - 行存在且终态 = 回合已结束（结果由 Stop hook 的 push_worker 推送，心跳静默退出）
+旧实现按"最新一行"判断，拿到的永远是上一个已结束的回合，于是每次启动都秒退：
+2026-09-14 实测 52 次启动、45 次"turn finished"秒退、推送 ⏳ 共 0 次——长任务提醒从未生效。
+
+退出条件：回合结束 / 桌面端进程消失 / 达到时长上限。
 """
 import json
 import os
 import sqlite3
-import subprocess
 import sys
 import time
-import urllib.request
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 from notify import (load_json, get_session_title, send_notification,  # noqa: E402
-                    log, CONFIG_PATH, STATE_PATH, SESSION_DB, BOT_STATE)
+                    CONFIG_PATH, STATE_PATH, SESSION_DB, BOT_STATE)
 
 HB_LOG = os.path.join(BASE, "heartbeat_log.jsonl")
+TERMINAL = ("completed", "error", "cancelled")
+TICK_SEC = 10  # 判定节拍：回合一结束就能在一个节拍内退出，不用干等整个间隔
 
 
 def hb_log(entry):
@@ -60,17 +68,29 @@ def zcode_alive():
         return True  # 异常时保守认为活着
 
 
-def latest_turn(session_id):
-    """该会话最新的回合：返回 (turn_id, status, started_at_ms, completed_at_ms) 或 None。"""
+def turn_row(turn_id):
+    """该回合的行：返回 (status, started_at, completed_at) 或 None（= 还没落库）。"""
     try:
         con = sqlite3.connect(SESSION_DB, timeout=3)
         row = con.execute(
-            "SELECT turn_id, status, started_at, completed_at FROM turn_usage "
-            "WHERE session_id=? ORDER BY started_at DESC LIMIT 1", (session_id,)).fetchone()
+            "SELECT status, started_at, completed_at FROM turn_usage WHERE turn_id=?",
+            (turn_id,)).fetchone()
         con.close()
         return row
     except Exception:
         return None
+
+
+def turn_progress(turn_id, spawned_at, now):
+    """→ (finished, elapsed_min)。行未落库即"仍在运行"，用 spawned_at 当起点估算。"""
+    row = turn_row(turn_id)
+    if row is None:
+        return False, max(1, int((now - spawned_at) / 60))
+    status, started_at, completed_at = row
+    if status in TERMINAL or completed_at:
+        return True, None
+    base = (started_at / 1000) if started_at else spawned_at
+    return False, max(1, int((now - base) / 60))
 
 
 def is_bot_session(session_id):
@@ -99,7 +119,6 @@ def _pid_alive(pid):
 def acquire_lock(session_id, max_age_s):
     """同会话单实例锁：已有活着的同会话心跳 → False（防多条「⏳」重复推送）。
     锁的持有进程已死或超时（> 1.5x 最大跟踪时长）则接管。"""
-    import ctypes
     path = _lock_path(session_id)
     existing = load_json(path, {})
     pid = existing.get("pid")
@@ -111,10 +130,15 @@ def acquire_lock(session_id, max_age_s):
     return True
 
 
+def _arg(name):
+    return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else ""
+
+
 def main():
     session_id = sys.argv[1] if len(sys.argv) > 1 else ""
-    interval_sec = int(sys.argv[sys.argv.index("--interval-sec") + 1]) if "--interval-sec" in sys.argv else None
-    max_minutes = int(sys.argv[sys.argv.index("--max-minutes") + 1]) if "--max-minutes" in sys.argv else None
+    turn_id = _arg("--turn-id")
+    interval_sec = int(_arg("--interval-sec")) if _arg("--interval-sec") else None
+    max_minutes = int(_arg("--max-minutes")) if _arg("--max-minutes") else None
 
     config = load_json(CONFIG_PATH, {})
     interval_sec = interval_sec or int(config.get("heartbeat_interval_min", 30)) * 60
@@ -128,43 +152,45 @@ def main():
     webhook = config.get("webhook")
     if not webhook and not os.path.exists(os.path.join(BASE, "aibot_config.json")):
         return 0  # 两个通道都没有
+    if not turn_id:
+        # 没有回合号就无从判断"这一轮是否还在跑"（看最新一行只会看到上一轮），宁可不推
+        hb_log({"ts": time.time(), "exit": "no turn id in payload", "session_id": session_id})
+        return 0
 
     if not acquire_lock(session_id, max_minutes):
         hb_log({"ts": time.time(), "exit": "another heartbeat running", "session_id": session_id})
         return 0
 
-    hb_log({"ts": time.time(), "start": session_id, "interval_sec": interval_sec})
-    time.sleep(5)  # 等回合记录落库
+    spawned_at = time.time()
+    next_push_at = spawned_at + interval_sec
+    hb_log({"ts": spawned_at, "start": session_id, "turn_id": turn_id[:20],
+            "interval_sec": interval_sec})
 
     while True:
+        time.sleep(TICK_SEC)
+        now = time.time()
         if not zcode_alive():
-            hb_log({"ts": time.time(), "exit": "desktop gone", "session_id": session_id})
+            hb_log({"ts": now, "exit": "desktop gone", "session_id": session_id})
             return 0
-        row = latest_turn(session_id)
-        if row is None:
-            hb_log({"ts": time.time(), "exit": "no turn rows", "session_id": session_id})
-            return 0
-        turn_id, status, started_at, completed_at = row
-        if status in ("completed", "error", "cancelled") or completed_at:
-            hb_log({"ts": time.time(), "exit": "turn finished",
-                    "session_id": session_id, "turn_id": turn_id[:20], "status": status})
+        finished, elapsed_min = turn_progress(turn_id, spawned_at, now)
+        if finished:
+            hb_log({"ts": now, "exit": "turn finished", "session_id": session_id,
+                    "turn_id": turn_id[:20]})
             return 0  # 结果由 Stop hook 推送
-
-        elapsed_min = max(1, int((time.time() - started_at / 1000) / 60))
         if elapsed_min >= max_minutes:
-            hb_log({"ts": time.time(), "exit": "max duration", "session_id": session_id})
+            hb_log({"ts": now, "exit": "max duration", "session_id": session_id,
+                    "elapsed_min": elapsed_min})
             return 0
-
-        title = f"⏳ 任务仍在运行（已 {elapsed_min} 分钟）｜{get_session_title(session_id)}"
-        summary = f"长任务尚未结束，不需要操作。\n> {time.strftime('%H:%M')} · {session_id[:16]}"
-        try:
-            ok, channel, _ = send_notification(webhook, title, summary)
-            hb_log({"ts": time.time(), "pushed": ok, "channel": channel,
-                    "elapsed_min": elapsed_min, "session_id": session_id})
-        except Exception as e:
-            hb_log({"ts": time.time(), "error": str(e)[:150], "session_id": session_id})
-
-        time.sleep(interval_sec)
+        if now >= next_push_at:
+            title = f"⏳ 任务仍在运行（已 {elapsed_min} 分钟）｜{get_session_title(session_id)}"
+            summary = f"长任务尚未结束，不需要操作。\n> {time.strftime('%H:%M')} · {session_id[:16]}"
+            try:
+                ok, channel, _ = send_notification(webhook, title, summary)
+                hb_log({"ts": now, "pushed": ok, "channel": channel,
+                        "elapsed_min": elapsed_min, "session_id": session_id})
+            except Exception as e:
+                hb_log({"ts": now, "error": str(e)[:150], "session_id": session_id})
+            next_push_at = now + interval_sec
 
 
 if __name__ == "__main__":
