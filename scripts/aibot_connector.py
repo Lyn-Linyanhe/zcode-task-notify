@@ -80,10 +80,65 @@ def build_card(task_id, title, desc):
     }}
 
 
+STATE_PATH = os.path.join(BASE, "state.json")
+
+
+def _set_enabled(on):
+    state = {}
+    try:
+        with open(STATE_PATH, encoding="utf-8") as f:
+            state = json.load(f)
+    except Exception:
+        pass
+    state["enabled"] = on
+    state["updated"] = time.strftime("%Y-%m-%d %H:%M")
+    with open(STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=1)
+
+
+def _status_text():
+    enabled = True
+    try:
+        with open(STATE_PATH, encoding="utf-8") as f:
+            enabled = json.load(f).get("enabled", True)
+    except Exception:
+        pass
+    return (f"{'🔔 通知开启中' if enabled else '🔇 通知已静默'}\n"
+            f"连接器：{'在线' if ws.is_connected else '掉线'}\n"
+            f"可用指令：静默 / 恢复 / 状态")
+
+
+def handle_command(content):
+    """返回回复文本；None = 非指令（如首次激活消息），不回复。"""
+    t = content.strip()
+    if t in ("静默", "关闭通知", "静音"):
+        _set_enabled(False)
+        return "🔇 已静默——不再推送任何通知（含权限卡片）。发「恢复」重新开启。"
+    if t in ("恢复", "开启通知", "取消静默"):
+        _set_enabled(True)
+        return "🔔 已恢复通知。"
+    if t in ("状态", "status"):
+        return _status_text()
+    return None
+
+
 @ws.on("message.text")
 async def on_text(frame):
-    """首次收到单聊消息时自动捕获目标 userid（免去手填）。"""
     body = frame.get("body") or {}
+    content = ((body.get("text") or {}).get("content") or "").strip()
+
+    # 群指令：静默/恢复/状态（单聊与内部群均可用）
+    if content:
+        reply_text = handle_command(content)
+        if reply_text:
+            log({"ts": time.time(), "aibot_cmd": content[:10]})
+            try:
+                await ws.reply(frame, {"msgtype": "text", "text": {"content": reply_text}})
+            except Exception as e:
+                log({"ts": time.time(), "error": f"cmd reply: {e}"})
+            return
+
+    # 首次单聊：捕获目标 userid（免去手填）
     if CFG.get("target_userid") or body.get("chattype") != "single":
         return
     uid = (body.get("from") or {}).get("userid")
