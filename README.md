@@ -120,6 +120,8 @@ python install.py --webhook "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?ke
 
 > 卡片决策同样只对**新会话**生效（见已知坑 1）。
 
+**统一通知通道（启用手机批准后）**：所有通知（✅❌⏸️⏳）自动优先走智能机器人单聊（一个消息来源，干净），连接器不在线时**自动降级**回群 webhook，通知永不静默丢失；群 webhook 出现「降级消息」本身就等于报警。未启用 aibot 的用户行为不变（纯 webhook）。
+
 ## 配置项（`scripts/config.json`）
 
 | 键 | 默认 | 说明 |

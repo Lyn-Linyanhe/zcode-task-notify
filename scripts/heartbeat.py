@@ -14,7 +14,7 @@ import urllib.request
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
-from notify import (load_json, get_session_title, send_wecom,  # noqa: E402
+from notify import (load_json, get_session_title, send_notification,  # noqa: E402
                     log, CONFIG_PATH, STATE_PATH, SESSION_DB, BOT_STATE)
 
 HB_LOG = os.path.join(BASE, "heartbeat_log.jsonl")
@@ -126,8 +126,8 @@ def main():
     if not state.get("enabled", True):
         return 0
     webhook = config.get("webhook")
-    if not webhook:
-        return 0
+    if not webhook and not os.path.exists(os.path.join(BASE, "aibot_config.json")):
+        return 0  # 两个通道都没有
 
     if not acquire_lock(session_id, max_minutes):
         hb_log({"ts": time.time(), "exit": "another heartbeat running", "session_id": session_id})
@@ -158,9 +158,9 @@ def main():
         title = f"⏳ 任务仍在运行（已 {elapsed_min} 分钟）｜{get_session_title(session_id)}"
         summary = f"长任务尚未结束，不需要操作。\n> {time.strftime('%H:%M')} · {session_id[:16]}"
         try:
-            send_wecom(webhook, title, summary)
-            hb_log({"ts": time.time(), "pushed": True, "elapsed_min": elapsed_min,
-                    "session_id": session_id})
+            ok, channel, _ = send_notification(webhook, title, summary)
+            hb_log({"ts": time.time(), "pushed": ok, "channel": channel,
+                    "elapsed_min": elapsed_min, "session_id": session_id})
         except Exception as e:
             hb_log({"ts": time.time(), "error": str(e)[:150], "session_id": session_id})
 

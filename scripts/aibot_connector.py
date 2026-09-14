@@ -162,6 +162,25 @@ async def h_health(request):
                               "target": bool(CFG.get("target_userid"))})
 
 
+async def h_notify(request):
+    """hook/worker → 连接器：日常通知经机器人单聊推送。body: {title, content}"""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    if not ws.is_connected or not CFG.get("target_userid"):
+        return web.json_response({"ok": False, "error": "connector unavailable"}, status=503)
+    try:
+        await ws.send_message(CFG["target_userid"], {
+            "msgtype": "markdown",
+            "markdown": {"content": str(data.get("content") or data.get("title") or "")},
+        })
+        return web.json_response({"ok": True})
+    except Exception as e:
+        log({"ts": time.time(), "error": f"notify send: {e}"})
+        return web.json_response({"ok": False, "error": str(e)[:200]}, status=502)
+
+
 async def h_card(request):
     """hook 进程 → 连接器：发权限卡片。body: {task_id, title, desc}"""
     try:
@@ -225,6 +244,7 @@ async def main():
     app = web.Application()
     app.router.add_get("/health", h_health)
     app.router.add_post("/card", h_card)
+    app.router.add_post("/notify", h_notify)
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "127.0.0.1", int(CFG.get("local_port", 17899))).start()

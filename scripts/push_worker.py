@@ -12,7 +12,7 @@ import urllib.request
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
-from notify import (load_json, log, make_summary, send_wecom,  # noqa: E402
+from notify import (load_json, log, make_summary, send_notification,  # noqa: E402
                     get_session_title, CONFIG_PATH, STATE_PATH, SESSION_DB, MAX_SUMMARY)
 
 SUMMARY_SYSTEM = ("把 AI 助手的任务回复压缩成一条微信通知摘要：一句话说清做了什么和结果，"
@@ -119,8 +119,10 @@ def process_payload(payload):
     if not state.get("enabled", True):
         return {"action": "skip", "reason": "switch off", "session_id": session_id}
     config = load_json(CONFIG_PATH, {})
-    if not config.get("webhook"):
-        return {"action": "skip", "reason": "no webhook", "session_id": session_id}
+    webhook = config.get("webhook")
+    has_aibot = os.path.exists(os.path.join(BASE, "aibot_config.json"))
+    if not webhook and not has_aibot:
+        return {"action": "skip", "reason": "no channel", "session_id": session_id}
     if event == "ConfigSelfHeal":
         keys = "、".join(payload.get("removed_keys") or [])
         return {"action": "push", "title": "🔧 hooks 配置自愈",
@@ -178,8 +180,8 @@ def main():
             log({"ts": time.time(), "llm_summary_used": True, "session_id": result["session_id"]})
 
     final = f"{body}\n> {time.strftime('%H:%M')} · {result['session_id'][:16]}"
-    ok, detail = send_wecom(config["webhook"], result["title"], final)
-    log({"ts": time.time(), "pushed": ok, "detail": detail[:200],
+    ok, channel, detail = send_notification(config.get("webhook"), result["title"], final)
+    log({"ts": time.time(), "pushed": ok, "channel": channel, "detail": detail[:200],
          "session_id": result["session_id"], "title": result["title"]})
     return 0
 

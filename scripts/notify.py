@@ -147,6 +147,39 @@ def send_wecom(webhook, title, summary):
     return False, detail
 
 
+def _try_aibot(title, summary):
+    """机器人通道：连接器 /notify 在线且已捕获目标 → True。任何异常静默 False。"""
+    try:
+        cfg_path = os.path.join(BASE, "aibot_config.json")
+        if not os.path.exists(cfg_path):
+            return False
+        cfg = load_json(cfg_path, {})
+        if not cfg.get("bot_id") or not cfg.get("target_userid"):
+            return False
+        port = int(cfg.get("local_port", 17899))
+        body = {"title": title, "content": f"**{title}**\n{summary}"}
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/notify",
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            return json.loads(resp.read().decode("utf-8")).get("ok") is True
+    except Exception:
+        return False
+
+
+def send_notification(webhook, title, summary):
+    """统一推送入口：智能机器人（单聊）优先，连接器不可用降级群 webhook。
+    返回 (是否成功, 通道名, 详情)。"""
+    if _try_aibot(title, summary):
+        return True, "aibot", "ok"
+    if webhook:
+        ok, detail = send_wecom(webhook, title, summary)
+        return ok, "webhook", detail
+    log_failure(f"推送失败（无可用通道：aibot 不在线且未配 webhook）| {title}")
+    return False, "none", "no channel"
+
+
 def _cleanup_pending(max_age_s=3600):
     """清理 worker 崩溃遗留的 payload 临时文件（>1 小时）。"""
     try:
