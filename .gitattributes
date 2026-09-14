@@ -1,0 +1,3 @@
+# .bat 必须是 CRLF：cmd.exe 解析批处理时对 LF-only 文件不可靠（goto 找标签、多行 if 块）。
+# -text = 原样存储，这样 GitHub 的 Download ZIP 解压出来也是 CRLF（text 属性会被规范化成 LF）。
+*.bat -text

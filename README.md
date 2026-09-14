@@ -8,6 +8,19 @@
    > 14:20 · sess_xxxxxxxx（会话 ID 截断展示）
 ```
 
+## 三步装好
+
+1. **拿地址**：手机企业微信 → 群 → 右上角「···」→「消息推送」→ 添加自定义消息推送 → 复制那串 `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…`
+   （没有企业微信先注册，个人免费；图文步骤见「[第一步](#第一步获取企业微信-webhook免费约-5-分钟)」，约 5 分钟）
+2. **装**：下载本仓库（GitHub 页 `Code → Download ZIP`）解压，**双击 `install.bat`**，按提示把地址粘进去
+   —— 装完手机上会立刻收到一条「🩺 安装成功」，说明通道已通
+3. **验**：在 ZCode 里**新建一个会话**随便问一句，会话结束时手机收到「✅ 任务完成（耗时 xx）」就成了
+
+> 没装 Python 也能直接双击：`install.bat` 会自动弹出一份中文安装指引。
+> 装完遇到任何问题，在仓库目录跑 `python doctor.py`（16 项自检，直接指出哪一步不对）。
+
+**想要手机批准/拒绝权限**（可选项）：多做一步创建「智能机器人」，见[进阶章节](#进阶手机批准拒绝可选)；想开 AI 摘要：`python install.py --llm-key "你的key"`。
+
 ## 功能
 
 - **三类事件推送**：任务完成 ✅ / 任务出错 ❌ / 等待确认 ⏸️，完成与出错的标题带任务耗时（按本地数据库的回合真实状态区分，取消不推）
@@ -36,6 +49,7 @@ ZCode hooks（会话进程启动时加载，Stop/PermissionRequest/UserPromptSub
 - Windows 10/11（使用了 Win32 进程枚举与分离进程 API）
 - ZCode 桌面端 **3.11.2+**（hooks schema 在此版本验证）
 - Python 3.10+（仅标准库，无第三方依赖；**安装时记得勾选 "Add Python to PATH"**）
+  —— 没装也没关系：双击 `install.bat` 会自动弹出一份中文指引（下载地址 + 该勾哪一项）
 - 手机安装**企业微信 App**（接收通知的终点）
 - 一个企业微信群机器人 webhook（免费，获取步骤见下）
 
@@ -81,15 +95,26 @@ python -c "import json,urllib.request; req=urllib.request.Request('https://qyapi
 
 ## 第二步：安装
 
-clone 本仓库（若 GitHub 访问慢，可在仓库页点 **Code → Download ZIP**）后，运行安装脚本（webhook 用第一步拿到的地址）：
+**最省事**：下载本仓库（GitHub 页 **Code → Download ZIP**，或 `git clone`）解压后，**双击 `install.bat`** —— 它会自检 Python、按提示让你粘贴 webhook，装完立刻往群里发一条测试消息。
+
+命令行等价写法（`install.py` 不带参数就是交互式，想安静点加 `--no-test`）：
 
 ```bash
+python install.py                                   # 交互式：按提示粘贴 webhook 地址
 python install.py --webhook "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的key"
+python install.py --llm-key "xxx.yyy"               # 顺带开启 AI 摘要（可选，见下）
+python install.py --aibot --bot-id "aib..." --bot-secret "..."   # 手机批准/拒绝（可选，见进阶）
 ```
 
-脚本会：生成 `scripts/config.json` 与开关文件、**自动备份并合并** hooks 配置到 `%USERPROFILE%\.zcode\cli\config.json`（只改 `hooks` 键，其他配置和已有的其他 hook 原样保留，并有带时间戳的备份；重复运行不会重复挂载）。
+脚本会：生成 `scripts/config.json` 与开关文件、**自动备份并合并** hooks 配置到 `%USERPROFILE%\.zcode\cli\config.json`（只改 `hooks` 键，其他配置和已有的其他 hook 原样保留，并有带时间戳的备份；重复运行不会重复挂载）。**换过目录或重新下载后，重跑一次即可**——它会自动清掉指向旧位置的重复注册（否则两条 hook 同时跑，会出现"通知时有时无"，见已知坑 11）。
 
-**（可选）接入 LLM 摘要**：在 [bigmodel.cn 控制台](https://bigmodel.cn/console/usercenter/apikeys) 创建一个 API Key（免费注册），然后编辑 `scripts/config.json`：
+**（可选）接入 LLM 摘要**：在 [bigmodel.cn 控制台](https://bigmodel.cn/console/usercenter/apikeys) 创建一个 API Key（免费注册），然后：
+
+```bash
+python install.py --llm-key "你的bigmodel key"      # 推荐：一条命令搞定
+```
+
+或者手动编辑 `scripts/config.json`（三处都要对）：
 
 ```json
 {
@@ -102,11 +127,14 @@ python install.py --webhook "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?ke
 
 ## 第三步：验证
 
+安装脚本已经往群里发过一条「🩺 安装成功」（收到就说明**推送通道**通了）；这一步验证的是**自动触发**那一环：
+
 **在 ZCode 里新建一个会话**，随便发一句话。该会话回复结束时，企业微信应收到「✅ 任务完成」推送，长这样（图为 `doctor.py` 的自检测试消息）：
 
 <img src="docs/images/wecom-test-success.jpg" width="380">
 
 > 为什么必须新建会话：hooks 配置在会话进程启动时加载，改动只对新会话生效（见下方「已知坑」第 1 条）。
+> 没收到就看 `notify_log.jsonl`：无记录 = hook 没触发（会话是不是新建的？）；有 `skipped`/`error` 字段 = 按原因对症处理。
 
 ## 进阶：手机批准/拒绝（可选）
 
@@ -135,6 +163,8 @@ python install.py --webhook "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?ke
 ```bash
 python install.py --aibot --bot-id "aib..." --bot-secret "..."
 ```
+
+（如果通知部分还没装，可以一次装完：`python install.py --webhook "https://...key=你的key" --aibot --bot-id "aib..." --bot-secret "..."`）
 
 **第三步：激活**——给这个机器人**发一条单聊消息**（如"你好"），连接器自动捕获你的推送地址并就绪。
 
@@ -197,6 +227,7 @@ python install.py --uninstall
 8. **卡片原位更新必须保持 `card_type=button_interaction`**：想换成 `text_notice` 会报 `42045 Template_Card card_action Missing or Invalid`，卡片纹丝不动。代价是结果卡上的按钮**依然可以再点**，所以 `on_card_click` 做了幂等——同一 `task_id` 只认第一次决定，重复点击只留一条 `decision_dup` 日志。另外决定文件有 **15 分钟 TTL**（`cleanup_decisions`），隔很久再点旧卡会被当成新决定。
 9. **长任务心跳必须盯 payload 里的 `turnId` 那一行，不能看"该会话最新一行"**：因为行是回合结束后才写入的（见坑 5），"最新一行"永远是**上一个已结束的回合**，于是心跳每次启动都秒退——长任务提醒形同虚设（2026-09-14 实测 52 次启动、45 次秒退、⏳ 推送 0 次）。正确判据是：**该 turnId 的行不存在 = 本轮还在跑**（起点用心跳自己的启动时刻），行出现且终态 = 结束。另注意 ⏳ 必须**先等满一个间隔再推**，否则每条消息都会立刻收到一条"仍在运行"。
 10. **微信指令只认主人**：连接器会把发送者的 `userid` 与 `aibot_config.json` 里的 `target_userid` 比对，不一致的指令只记一条 `aibot_cmd_ignored` 日志，既不回复也不执行（要能"做事"，鉴权必须先立住）。尚未绑定主人时只接受**单聊**里的第一位发送者——群聊无法确认归属，一律先拒，避免被陌生人抢绑。所以新装机请先用本人账号在单聊里发一句话完成绑定。
+11. **hooks 里记的是脚本的绝对路径**，所以仓库目录被挪走或重新下载到别处后，旧注册会变成"指向不存在文件"的死条目；更隐蔽的情况是旧目录还在，于是**两条 hook 同时跑**——一条推送正常、另一条静默失败，现象是"通知时有时无 + 失败日志莫名增多"。重跑一次 `python install.py`（或双击 `install.bat`）即可自动清掉指向旧位置的注册，不用手改配置。
 
 ## 故障排查
 
