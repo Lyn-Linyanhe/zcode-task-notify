@@ -21,7 +21,7 @@ import time
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 from notify import (load_json, get_session_title, send_notification,  # noqa: E402
-                    CONFIG_PATH, STATE_PATH, SESSION_DB, BOT_STATE)
+                    notifications_enabled, CONFIG_PATH, STATE_PATH, SESSION_DB, BOT_STATE)
 
 HB_LOG = os.path.join(BASE, "heartbeat_log.jsonl")
 TERMINAL = ("completed", "error", "cancelled")
@@ -147,7 +147,7 @@ def main():
     if not session_id or is_bot_session(session_id):
         return 0
     state = load_json(STATE_PATH, {"enabled": True})
-    if not state.get("enabled", True):
+    if not notifications_enabled(state)[0]:
         return 0
     webhook = config.get("webhook")
     if not webhook and not os.path.exists(os.path.join(BASE, "aibot_config.json")):

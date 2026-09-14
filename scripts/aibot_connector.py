@@ -21,7 +21,8 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 from aiohttp import web  # noqa: E402
 from aibot import WSClient, WSClientOptions  # noqa: E402
-from notify import log  # noqa: E402
+from notify import (log, load_json, mute_for_minutes, mute_remaining_min,  # noqa: E402
+                    notifications_enabled, parse_mute_minutes, sender_allowed, update_state)
 
 CFG = json.load(open(os.path.join(BASE, "aibot_config.json"), encoding="utf-8"))
 DECISIONS_DIR = os.path.join(BASE, "decisions")
@@ -83,72 +84,81 @@ def build_card(task_id, title, desc):
 STATE_PATH = os.path.join(BASE, "state.json")
 
 
+HELP_TEXT = (
+    "📖 可用指令\n"
+    "状态 — 通知开关 / 连接器是否在线\n"
+    "静默 / 恢复 — 手动开关全部通知\n"
+    "静默 30 — 定时静默 30 分钟，到点自动恢复\n"
+    "最近 — 看最近 3 条推送\n"
+    "帮助 — 这条说明\n"
+    "复杂任务请打开手机远程控制页面，这里只做简单指令。")
+
+
 def _set_enabled(on):
-    state = {}
-    try:
-        with open(STATE_PATH, encoding="utf-8") as f:
-            state = json.load(f)
-    except Exception:
-        pass
-    state["enabled"] = on
-    state["updated"] = time.strftime("%Y-%m-%d %H:%M")
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=1)
+    """开关通知。任意一次手动开关都会清掉定时静默，避免两个开关打架。"""
+    update_state(enabled=on, mute_until=0)
 
 
 def _status_text():
-    enabled = True
+    state = load_json(STATE_PATH, {"enabled": True})
+    enabled, reason = notifications_enabled(state)
+    left = mute_remaining_min(state)
+    if not enabled and reason == "muted":
+        head = f"🔇 定时静默中（还有 {left} 分钟，到点自动恢复）"
+    else:
+        head = "🔔 通知开启中" if enabled else "🔇 通知已静默（发「恢复」开启）"
+    return (f"{head}\n"
+            f"连接器：{'在线' if ws.is_connected else '掉线'}\n"
+            f"可用指令：发「帮助」查看")
+
+
+def _recent_text(n=3):
+    """最近几条推送（读推送日志，只取成功推送的条目）。"""
+    entries = []
     try:
-        with open(STATE_PATH, encoding="utf-8") as f:
-            enabled = json.load(f).get("enabled", True)
+        with open(os.path.join(BASE, "notify_log.jsonl"), encoding="utf-8") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                if d.get("pushed") and d.get("title"):
+                    entries.append(d)
     except Exception:
         pass
-    return (f"{'🔔 通知开启中' if enabled else '🔇 通知已静默'}\n"
-            f"连接器：{'在线' if ws.is_connected else '掉线'}\n"
-            f"可用指令：静默 / 恢复 / 状态")
+    if not entries:
+        return "🕘 还没有推送记录。"
+    out = [f"🕘 最近 {min(n, len(entries))} 条推送"]
+    for d in reversed(entries[-n:]):
+        out.append(f"{time.strftime('%H:%M', time.localtime(d['ts']))} {d['title']}")
+    return "\n".join(out)
 
 
 def handle_command(content):
     """返回回复文本；None = 非指令（如首次激活消息），不回复。"""
     t = content.strip()
-    if t in ("静默", "关闭通知", "静音"):
-        _set_enabled(False)
-        return "🔇 已静默——不再推送任何通知（含权限卡片）。发「恢复」重新开启。"
+    if t in ("帮助", "指令", "help", "?"):
+        return HELP_TEXT
     if t in ("恢复", "开启通知", "取消静默"):
         _set_enabled(True)
         return "🔔 已恢复通知。"
     if t in ("状态", "status"):
         return _status_text()
-    return None
+    if t in ("最近", "最近通知", "推送记录"):
+        return _recent_text()
+    minutes = parse_mute_minutes(t)
+    if minutes is None:
+        return None
+    if minutes == 0:
+        _set_enabled(False)
+        return "🔇 已静默——不再推送任何通知（含权限卡片）。发「恢复」重新开启。"
+    until = time.strftime("%H:%M", time.localtime(time.time() + minutes * 60))
+    mute_for_minutes(minutes)
+    return f"🔇 已静默 {minutes} 分钟（{until} 自动恢复）。想提前结束发「恢复」。"
 
 
-@ws.on("message.text")
-async def on_text(frame):
-    body = frame.get("body") or {}
-    content = ((body.get("text") or {}).get("content") or "").strip()
-
-    # 群指令：静默/恢复/状态（单聊与内部群均可用）
-    if content:
-        reply_text = handle_command(content)
-        if reply_text:
-            log({"ts": time.time(), "aibot_cmd": content[:10]})
-            try:
-                # 长连接模式没有 text 类型：普通（一次性）回复也必须走流式结构——
-                # msgtype=stream + finish=true，否则企业微信回执 40008 invalid message type
-                # （2026-09-14 实测：「状态」指令能收到但回复被退回）
-                await ws.reply_stream(
-                    frame, f"stream_{int(time.time() * 1000)}_{os.getpid()}",
-                    reply_text, finish=True)
-            except Exception as e:
-                log({"ts": time.time(), "error": f"cmd reply: {e}"})
-            return
-
-    # 首次单聊：捕获目标 userid（免去手填）
-    if CFG.get("target_userid") or body.get("chattype") != "single":
-        return
-    uid = (body.get("from") or {}).get("userid")
-    if not uid:
-        return
+def _capture_target(uid):
+    """首次单聊：记下主人 userid（免去手填），同时作为指令鉴权依据。"""
     CFG["target_userid"] = uid
     try:
         path = os.path.join(BASE, "aibot_config.json")
@@ -160,6 +170,37 @@ async def on_text(frame):
         print(f"已捕获单聊目标: {uid[:10]}…", flush=True)
     except Exception as e:
         log({"ts": time.time(), "error": f"target capture: {e}"})
+
+
+@ws.on("message.text")
+async def on_text(frame):
+    body = frame.get("body") or {}
+    content = ((body.get("text") or {}).get("content") or "").strip()
+    if not content:
+        return
+    uid = (body.get("from") or {}).get("userid") or ""
+    chattype = body.get("chattype")
+
+    # 先认主人（首条单聊消息建立绑定），再鉴权——指令只认主人，别人发的只记日志不回
+    if not CFG.get("target_userid") and chattype == "single" and uid:
+        _capture_target(uid)
+    if not sender_allowed(uid, CFG.get("target_userid"), chattype):
+        log({"ts": time.time(), "aibot_cmd_ignored": f"not owner {uid[:6]}…"})
+        return
+
+    reply_text = handle_command(content)
+    if not reply_text:
+        return
+    log({"ts": time.time(), "aibot_cmd": content[:10]})
+    try:
+        # 长连接模式没有 text 类型：普通（一次性）回复也必须走流式结构——
+        # msgtype=stream + finish=true，否则企业微信回执 40008 invalid message type
+        # （2026-09-14 实测：「状态」指令能收到但回复被退回）
+        await ws.reply_stream(
+            frame, f"stream_{int(time.time() * 1000)}_{os.getpid()}",
+            reply_text, finish=True)
+    except Exception as e:
+        log({"ts": time.time(), "error": f"cmd reply: {e}"})
 
 
 async def h_health(request):

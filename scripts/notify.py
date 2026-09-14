@@ -26,8 +26,67 @@ MAX_SUMMARY = 120
 HTTP_TIMEOUT = 5
 MAX_LOG_LINES = 500
 KEEP_LOG_LINES = 400
+MAX_MUTE_MINUTES = 24 * 60
 
 _FILLER = re.compile(r"^(好的?|明白了?|收到|没问题|当然|ok|首先|嗯+|对[，,]?|好的呢)[，,！!。.\s]")
+_MUTE_RE = re.compile(r"^静默\s*(\d+)\s*(?:分钟|分|min|m)?$")
+
+
+def notifications_enabled(state, now=None):
+    """是否应当推送 → (bool, 原因)。定时静默（mute_until）由读者按时钟判断，
+    不需要额外的定时进程：到点自然失效，state.json 无需清理。"""
+    now = time.time() if now is None else now
+    if not state.get("enabled", True):
+        return False, "switch off"
+    if (state.get("mute_until") or 0) > now:
+        return False, "muted"
+    return True, "on"
+
+
+def mute_remaining_min(state, now=None):
+    """定时静默剩余分钟数；已被手动静默或未静默 → None。"""
+    now = time.time() if now is None else now
+    if not state.get("enabled", True):
+        return None
+    left = (state.get("mute_until") or 0) - now
+    return max(1, int((left + 59) // 60)) if left > 0 else None
+
+
+def parse_mute_minutes(text):
+    """指令文本 → 静默分钟数。0 = 手动静默（不自动恢复）；None = 不是静默指令。
+    上限 24 小时，防手误打成天文数字。"""
+    t = (text or "").strip()
+    if t in ("静默", "关闭通知", "静音"):
+        return 0
+    m = _MUTE_RE.match(t)
+    return min(int(m.group(1)), MAX_MUTE_MINUTES) if m else None
+
+
+def sender_allowed(uid, owner, chattype):
+    """指令只认主人。已绑定 target_userid 时必须与发送者一致；尚未绑定则只接受单聊的
+    第一位发送者（群聊无法确认归属，一律先拒，避免被陌生人抢绑或误控）。"""
+    if not uid:
+        return False
+    if owner:
+        return uid == owner
+    return chattype == "single"
+
+
+def update_state(**fields):
+    """读-改-写 state.json（静默/恢复都走这里，格式统一）。"""
+    state = load_json(STATE_PATH, {"enabled": True})
+    state.update(fields)
+    state["updated"] = time.strftime("%Y-%m-%d %H:%M")
+    with open(STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=1)
+    return state
+
+
+def mute_for_minutes(minutes, now=None):
+    """定时静默：只写 mute_until，**不动 enabled**——若同时把 enabled 置 false，读取方会
+    当成手动静默（提醒语与剩余时间都拿不到），到点也不会自动恢复。"""
+    now = time.time() if now is None else now
+    return update_state(mute_until=now + minutes * 60)
 
 
 def load_json(path, default):
@@ -211,10 +270,11 @@ def main():
 
     event = payload.get("hookEventName") or payload.get("hook_event_name") or "?"
 
-    # 快速闸门：开关关闭就静默退出（对通知和手机决策流一并生效，详细过滤在 worker 里）
+    # 快速闸门：开关关闭/定时静默就静默退出（对通知和手机决策流一并生效，详细过滤在 worker 里）
     state = load_json(STATE_PATH, {"enabled": True})
-    if not state.get("enabled", True):
-        log({"ts": time.time(), "skipped": "switch off",
+    ok, reason = notifications_enabled(state)
+    if not ok:
+        log({"ts": time.time(), "skipped": reason,
              "session_id": payload.get("session_id", "?")[:20]})
         return 0
 

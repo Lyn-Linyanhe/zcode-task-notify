@@ -5,6 +5,7 @@
 - 耗时/❌ 从不出现：Stop hook 触发时 turn_usage 行还没写入，轮询只判 running 会一次都不等。
 - 降级到群机器人后毫无提示：群机器人是单向的，用户会拿它当智能机器人去回复指令。
 """
+import json
 import os
 import sys
 import time
@@ -120,6 +121,63 @@ class TestDegradedChannelNotice(unittest.TestCase):
             ok, channel, _ = nt.send_notification("", "t", "b")
         self.assertFalse(ok)
         self.assertEqual(channel, "none")
+
+
+class TestMuteAndGate(unittest.TestCase):
+    """「静默 30」这类定时静默与开关判定。"""
+
+    def test_parse_mute_minutes(self):
+        self.assertEqual(nt.parse_mute_minutes("静默"), 0)
+        self.assertEqual(nt.parse_mute_minutes("静默 30"), 30)
+        self.assertEqual(nt.parse_mute_minutes("静默30分钟"), 30)
+        self.assertEqual(nt.parse_mute_minutes("静默  5 分"), 5)
+        self.assertEqual(nt.parse_mute_minutes("静默 99999"), nt.MAX_MUTE_MINUTES, "要有上限防手误")
+        self.assertIsNone(nt.parse_mute_minutes("取消静默"))
+        self.assertIsNone(nt.parse_mute_minutes("状态"))
+        self.assertIsNone(nt.parse_mute_minutes(""))
+
+    def test_notifications_enabled_variants(self):
+        now = 1000.0
+        self.assertEqual(nt.notifications_enabled({"enabled": True}, now), (True, "on"))
+        self.assertEqual(nt.notifications_enabled({"enabled": False}, now), (False, "switch off"))
+        self.assertEqual(
+            nt.notifications_enabled({"enabled": True, "mute_until": now + 60}, now), (False, "muted"))
+        self.assertEqual(
+            nt.notifications_enabled({"enabled": True, "mute_until": now - 1}, now), (True, "on"),
+            "定时静默过期后应自动恢复，无需任何清理动作")
+
+    def test_mute_remaining_minutes(self):
+        now = 1000.0
+        self.assertEqual(nt.mute_remaining_min({"enabled": True, "mute_until": now + 610}, now), 11)
+        self.assertIsNone(nt.mute_remaining_min({"enabled": True, "mute_until": now - 1}, now))
+        self.assertIsNone(nt.mute_remaining_min({"enabled": False, "mute_until": now + 600}, now),
+                          "手动静默没有到期时间")
+
+    def test_sender_allowed(self):
+        self.assertTrue(nt.sender_allowed("u1", "u1", "single"))
+        self.assertTrue(nt.sender_allowed("u1", "u1", "group"), "主人从群里发指令也算数")
+        self.assertFalse(nt.sender_allowed("u2", "u1", "single"), "别人发的必须拒")
+        self.assertTrue(nt.sender_allowed("u9", None, "single"), "未绑定时单聊首人可建立绑定")
+        self.assertFalse(nt.sender_allowed("u9", None, "group"), "群聊无法确认归属，一律先拒")
+        self.assertFalse(nt.sender_allowed("", "u1", "single"))
+
+    def test_mute_for_minutes_keeps_enabled_true(self):
+        """定时静默只写 mute_until，不能顺手把 enabled 置 false——否则会被当成手动静默，
+        剩余时间拿不到、到点也不会自动恢复（2026-09-14 实测踩到）。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "state.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write('{"enabled": true}')
+            with mock.patch.object(nt, "STATE_PATH", path):
+                nt.mute_for_minutes(30, now=1000.0)
+                state = json.load(open(path, encoding="utf-8"))
+                self.assertTrue(state["enabled"], "enabled 必须保持 true")
+                self.assertEqual(state["mute_until"], 1000.0 + 1800)
+                self.assertEqual(nt.notifications_enabled(state, now=1000.0), (False, "muted"))
+                self.assertEqual(nt.mute_remaining_min(state, now=1000.0), 30)
+                # 到点自动恢复，无需任何清理
+                self.assertEqual(nt.notifications_enabled(state, now=1000.0 + 1801), (True, "on"))
 
 
 if __name__ == "__main__":

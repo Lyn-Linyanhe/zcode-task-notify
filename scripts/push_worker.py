@@ -13,7 +13,8 @@ import urllib.request
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 from notify import (load_json, log, make_summary, send_notification,  # noqa: E402
-                    get_session_title, CONFIG_PATH, STATE_PATH, SESSION_DB, MAX_SUMMARY)
+                    get_session_title, notifications_enabled,
+                    CONFIG_PATH, STATE_PATH, SESSION_DB, MAX_SUMMARY)
 
 SUMMARY_SYSTEM = ("把 AI 助手的任务回复压缩成一条微信通知摘要：一句话说清做了什么和结果，"
                   "60字以内，直接给内容，不要客套和markdown，保留关键数字。"
@@ -101,6 +102,10 @@ def llm_summary(text, cfg):
     if not key:
         return None
 
+    # 摘要只影响通知的"可读性"，不该拖慢通知本身：超时默认 10 秒（旧值 25 秒，
+    # 实测 39 次尝试里 9 次跑满 25 秒读超时后仍回退启发式——白等 25 秒）。
+    timeout_s = float(cfg.get("llm_timeout_sec", 10))
+    t0 = time.time()
     try:
         if fmt == "anthropic":
             url = base + "/v1/messages"
@@ -117,15 +122,17 @@ def llm_summary(text, cfg):
             headers = {"Content-Type": "application/json", "Authorization": "Bearer " + key}
         resp = json.loads(urllib.request.urlopen(
             urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers),
-            timeout=25).read())
+            timeout=timeout_s).read())
         if fmt == "anthropic":
             out = "".join(c.get("text", "") for c in resp.get("content", []) if c.get("type") == "text")
         else:
             msg = resp["choices"][0]["message"]
             out = (msg.get("content") or "").strip() or (msg.get("reasoning_content") or "").strip()
+        log({"ts": time.time(), "llm_ms": int((time.time() - t0) * 1000)})
         return out[:MAX_SUMMARY] or None
     except Exception as e:
-        log({"ts": time.time(), "llm_error": str(e)[:150]})
+        log({"ts": time.time(), "llm_error": str(e)[:150],
+             "llm_ms": int((time.time() - t0) * 1000)})
         return None
 
 
@@ -135,8 +142,9 @@ def process_payload(payload):
     session_id = payload.get("session_id") or payload.get("sessionId") or "?"
 
     state = load_json(STATE_PATH, {"enabled": True})
-    if not state.get("enabled", True):
-        return {"action": "skip", "reason": "switch off", "session_id": session_id}
+    ok, reason = notifications_enabled(state)
+    if not ok:
+        return {"action": "skip", "reason": reason, "session_id": session_id}
     config = load_json(CONFIG_PATH, {})
     webhook = config.get("webhook")
     has_aibot = os.path.exists(os.path.join(BASE, "aibot_config.json"))

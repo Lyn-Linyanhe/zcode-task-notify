@@ -35,13 +35,22 @@ class TestCommands(unittest.TestCase):
         reply = ac.handle_command("状态")
         self.assertIsNotNone(reply)
         self.assertIn("可用指令", reply)
-        self.assertIn("静默", reply)
+        self.assertIn("帮助", reply)
 
     def test_status_alias_matches_chinese(self):
         self.assertEqual(ac.handle_command("status"), ac.handle_command("状态"))
 
     def test_non_command_is_silent(self):
         self.assertIsNone(ac.handle_command("你好"))
+
+    def test_help_lists_commands_and_scope_boundary(self):
+        reply = ac.handle_command("帮助")
+        for token in ("状态", "静默", "最近", "远程控制页面"):
+            self.assertIn(token, reply)
+
+    def test_recent_reads_push_log(self):
+        reply = ac.handle_command("最近")
+        self.assertTrue(reply.startswith("🕘"), reply)
 
 
 @unittest.skipIf(ac is None, _SKIP)

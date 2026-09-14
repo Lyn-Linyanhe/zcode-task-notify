@@ -10,7 +10,7 @@ import time
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
-from notify import (load_json, log, bot_session_ids,  # noqa: E402
+from notify import (load_json, log, bot_session_ids, notifications_enabled,  # noqa: E402
                     STATE_PATH, BOT_STATE)
 
 PROBE_PATH = os.path.join(BASE, "usp_probe.jsonl")
@@ -109,9 +109,9 @@ def main():
     except Exception:
         pass
 
-    # 过滤：开关 / bot 会话 / 子代理
+    # 过滤：开关（含定时静默）/ bot 会话 / 子代理
     state = load_json(STATE_PATH, {"enabled": True})
-    if not state.get("enabled", True):
+    if not notifications_enabled(state)[0]:
         return 0
     bots = load_json(BOT_STATE, {}).get("bots")
     items = bots.values() if isinstance(bots, dict) else (bots or [])
