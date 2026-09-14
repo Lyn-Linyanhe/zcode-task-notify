@@ -288,13 +288,17 @@ def main():
         print("[warn] 还没填 webhook —— 装是装上了，但通知发不出去。填好后重跑本脚本即可。")
         print(WEBHOOK_HINT)
 
-    print("""
+    sent_test = bool(not args.no_test and webhook_now)
+    step1 = ("1. 手机上确认已收到「🩺 安装成功」——没收到就先跑 python doctor.py 定位问题"
+             if sent_test else
+             "1. 通道还没实测：跑 python doctor.py（会真发一条测试消息）确认能收到")
+    print(f"""
 安装完成。接下来：
-1. 手机上确认已收到「🩺 安装成功」——没收到就先跑 python doctor.py 定位问题
+{step1}
 2. 在 ZCode 里**新建一个会话**（hooks 只对新会话生效），随便问一句
 3. 会话结束时企业微信应收到「✅ 任务完成（耗时 xx）」
 4. 想临时关推送：直接给机器人发「静默」，或改 scripts/state.json 的 enabled
-5. 出问题：python doctor.py（16 项自检）；想卸载：python install.py --uninstall
+5. 出问题：python doctor.py（逐项自检）；想卸载：python install.py --uninstall
 """)
     return 0
 

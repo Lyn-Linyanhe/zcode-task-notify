@@ -17,7 +17,15 @@
 3. **验**：在 ZCode 里**新建一个会话**随便问一句，会话结束时手机收到「✅ 任务完成（耗时 xx）」就成了
 
 > 没装 Python 也能直接双击：`install.bat` 会自动弹出一份中文安装指引。
-> 装完遇到任何问题，在仓库目录跑 `python doctor.py`（16 项自检，直接指出哪一步不对）。
+> 装完遇到任何问题，在仓库目录跑 `python doctor.py`（逐项自检，直接指出哪一步不对；全装好 16 项、未启用手机批准时 14 项，**只要 0 FAIL 就算通过**）。
+
+**更省事：让 AI 帮你装。** 把下面这段整句发给你电脑上的 ZCode（任何能读网页、能跑命令的 agent 都行），它会照仓库里的执行手册装完；需要你做的事（去企业微信拿 webhook）会来问你：
+
+> 帮我在**这台电脑**上装好「ZCode 任务通知」——仓库 `https://github.com/Lyn-Linyanhe/zcode-task-notify`，执行手册是仓库根目录的 `AGENTS.md`（打不开就先 clone 或下载下来再读），
+> 按「A. 安装执行手册」执行：装到 `%USERPROFILE%\.zcode\task-notify`，需要我到企业微信建群机器人拿 webhook 再问我，
+> 装完跑 `python doctor.py` 自检并告诉我怎么验证、怎么静音、怎么卸载。我的系统是 Windows。
+
+（完整版提示词见 [`docs/agent-prompt.txt`](docs/agent-prompt.txt)；给 agent 的执行手册见 [`AGENTS.md`](AGENTS.md)。）
 
 **想要手机批准/拒绝权限**（可选项）：多做一步创建「智能机器人」，见[进阶章节](#进阶手机批准拒绝可选)；想开 AI 摘要：`python install.py --llm-key "你的key"`。
 
@@ -195,7 +203,7 @@ python install.py --aibot --bot-id "aib..." --bot-secret "..."
 
 ## 自检与卸载
 
-收不到通知时，一条命令定位问题（16 项检查：Python 版本 / 桌面端运行 / 开关 / webhook 配置与通道实测 / hooks 注册 / 顶层键毒化 / 脚本完整性 / LLM key / aibot 手机批准组件）：
+收不到通知时，一条命令定位问题（逐项检查：Python 版本 / 桌面端运行 / 开关 / webhook 配置与通道实测 / hooks 注册 / 顶层键毒化 / 脚本完整性 / LLM key / aibot 手机批准组件；全装好 16 项，未启用手机批准时 14 项）：
 
 ```bash
 python doctor.py                 # 含企业微信通道实测（会发一条测试消息）
