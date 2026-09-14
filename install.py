@@ -82,9 +82,12 @@ def install_aibot(args):
     if not os.path.exists(venv_py):
         print("[..] 创建 SDK 虚拟环境 .venv-aibot ...")
         venv_mod.create(venv_dir, with_pip=True)
-    print("[..] 安装 wecom-aibot-python-sdk（需联网）...")
-    r = subprocess.run([venv_py, "-m", "pip", "install", "--quiet",
-                        "wecom-aibot-python-sdk"], capture_output=True, text=True)
+    # 锁版本：SDK 的 reply / reply_stream 语义是本工具正确性的前提（40008 事故的根因），
+    # 官方发新版可能改动签名或消息类型约束——不要放开成无版本约束。
+    SDK_PIN = "wecom-aibot-python-sdk==1.0.2"
+    print(f"[..] 安装 {SDK_PIN}（需联网）...")
+    r = subprocess.run([venv_py, "-m", "pip", "install", "--quiet", SDK_PIN],
+                       capture_output=True, text=True)
     if r.returncode != 0:
         print(f"[FAIL] SDK 安装失败: {r.stderr[-300:]}")
         return 1
