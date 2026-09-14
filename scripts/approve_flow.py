@@ -51,11 +51,32 @@ def _decision_file(task_id):
     return os.path.join(BASE, "decisions", task_id + ".json")
 
 
+def _user_active(threshold_s=60):
+    """人在电脑前吗：键鼠最后输入距今 < threshold 秒即视为在位。
+    在位时跳过手机卡片流——桌面确认弹窗即时出现，不必等手机。"""
+    try:
+        import ctypes
+
+        class LASTINPUTINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+        lii = LASTINPUTINFO()
+        lii.cbSize = ctypes.sizeof(LASTINPUTINFO)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lii)):
+            return False  # 查询失败 → 按不在电脑前处理
+        idle_ms = (ctypes.windll.kernel32.GetTickCount() - lii.dwTime) & 0xFFFFFFFF
+        return idle_ms < threshold_s * 1000
+    except Exception:
+        return False  # 异常 → 按不在电脑前处理（保持卡片流可用）
+
+
 def run(payload):
-    """返回 "allow" / "deny" / None（超时） / "fallback"（连接器不可用）。"""
+    """返回 "allow" / "deny" / None（超时） / "fallback"（连接器不可用或人在电脑前）。"""
     try:
         cfg = _cfg()
     except Exception:
+        return "fallback"
+    if _user_active(int(cfg.get("desk_active_sec", 60))):
         return "fallback"
     request_id = payload.get("requestId") or payload.get("request_id") \
         or f"{int(time.time())}-{os.getpid()}"

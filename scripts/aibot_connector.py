@@ -29,22 +29,30 @@ TASK_PREFIX = "zc-"
 
 
 def acquire_lock():
-    """单实例锁：已有活的连接器则退出（每机器人只允许一条长连接）。"""
+    """单实例锁：文件独占创建 + PID 存活校验（防并发双实例互踢长连接）。"""
     path = os.path.join(BASE, "aibot_connector.lock")
-    try:
-        with open(path, encoding="utf-8") as f:
-            pid = json.load(f).get("pid")
-        if pid:
-            k32 = ctypes.windll.kernel32
-            h = k32.OpenProcess(0x1000, False, int(pid))  # QUERY_LIMITED_INFORMATION
-            if h:
-                k32.CloseHandle(h)
+    for _ in range(2):
+        try:
+            with open(path, "x", encoding="utf-8") as f:  # 独占创建，已存在即抛错
+                json.dump({"pid": os.getpid(), "started": time.time()}, f)
+            return True
+        except FileExistsError:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    pid = json.load(f).get("pid")
+                if pid:
+                    k32 = ctypes.windll.kernel32
+                    h = k32.OpenProcess(0x1000, False, int(pid))
+                    if h:
+                        k32.CloseHandle(h)
+                        return False  # 活实例在跑
+            except Exception:
+                return False  # 锁文件读不了且被占用 → 宁可退出
+            try:
+                os.remove(path)  # 死实例残留的锁，清掉重试
+            except OSError:
                 return False
-    except Exception:
-        pass
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"pid": os.getpid(), "started": time.time()}, f)
-    return True
+    return False
 
 
 def cleanup_decisions(max_age_s=900):
@@ -111,6 +119,10 @@ async def h_card(request):
                                  status=400)
     if not ws.is_connected:
         return web.json_response({"ok": False, "error": "ws offline"}, status=503)
+    if not CFG.get("target_userid"):
+        return web.json_response(
+            {"ok": False, "error": "target_userid 未捕获——先给机器人发一条单聊消息"},
+            status=503)
     try:
         await ws.send_message(CFG["target_userid"],
                               build_card(task_id, data.get("title") or "ZCode 请求确认",

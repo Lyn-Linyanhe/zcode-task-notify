@@ -168,7 +168,15 @@ def main():
 
     event = payload.get("hookEventName") or payload.get("hook_event_name") or "?"
 
-    # PermissionRequest：优先手机卡片批准/拒绝（阻塞流，超时或连接器不在线自动降级）
+    # 快速闸门：开关关闭就静默退出（对通知和手机决策流一并生效，详细过滤在 worker 里）
+    state = load_json(STATE_PATH, {"enabled": True})
+    if not state.get("enabled", True):
+        log({"ts": time.time(), "skipped": "switch off",
+             "session_id": payload.get("session_id", "?")[:20]})
+        return 0
+
+    # PermissionRequest：优先手机卡片批准/拒绝（阻塞流，超时或连接器不在线自动降级）；
+    # approve_flow 内部有「人在电脑前」检测——刚用过键鼠就不走手机，桌面弹窗即时出现
     if event == "PermissionRequest":
         decision = "fallback"
         try:
@@ -192,13 +200,6 @@ def main():
                  "session_id": str(payload.get("session_id", "?"))[:20]})
             return 0
         # decision == "fallback" → 继续走下方 webhook ⏸️ 通知
-
-    # 快速闸门：开关关闭就不 spawn（详细过滤在 worker 里）
-    state = load_json(STATE_PATH, {"enabled": True})
-    if not state.get("enabled", True):
-        log({"ts": time.time(), "skipped": "switch off",
-             "session_id": payload.get("session_id", "?")[:20]})
-        return 0
 
     os.makedirs(PENDING_DIR, exist_ok=True)
     _cleanup_pending()

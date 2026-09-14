@@ -4,5 +4,6 @@
  "target_userid": "留空即可：首次给机器人发单聊消息时自动捕获",
  "local_port": 17899,
  "card_timeout_sec": 100,
- "venv_python": "python install.py --aibot 时自动填"
+ "venv_python": "python install.py --aibot 时自动填",
+ "desk_active_sec": 60
 }
