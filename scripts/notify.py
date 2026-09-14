@@ -140,6 +140,46 @@ def bot_session_ids():
     return {b["activeTaskId"] for b in items if isinstance(b, dict) and b.get("activeTaskId")}
 
 
+def _pid_alive(pid):
+    import ctypes
+    k32 = ctypes.windll.kernel32
+    h = k32.OpenProcess(0x1000, False, int(pid))  # QUERY_LIMITED_INFORMATION
+    if not h:
+        return False
+    k32.CloseHandle(h)
+    return True
+
+
+def running_sessions(now=None):
+    """当前正在运行的会话：读心跳锁 hb_lock_*.lock——锁进程活着 = 该回合还在跑。
+
+    不能用 turn_usage 判"在跑"：那行是回合**结束后**才写入的，跑着的回合在表里根本没有行。
+    返回按已运行时长降序的 [{session_id, title, elapsed_min, turn_id}]。
+    旧格式锁（无 session_id 字段）跳过——该会话下次提交消息后即恢复可见。
+    """
+    now = time.time() if now is None else now
+    out = []
+    try:
+        names = [n for n in os.listdir(BASE) if n.startswith("hb_lock_") and n.endswith(".lock")]
+    except Exception:
+        return out
+    for n in names:
+        d = load_json(os.path.join(BASE, n), {})
+        sid, pid = d.get("session_id") or "", d.get("pid")
+        if not sid or not pid:
+            continue
+        try:
+            if not _pid_alive(int(pid)):
+                continue
+        except Exception:
+            continue
+        out.append({"session_id": sid, "turn_id": d.get("turn_id", ""),
+                    "elapsed_min": max(1, int((now - d.get("started", now)) / 60)),
+                    "title": get_session_title(sid)})
+    out.sort(key=lambda r: -r["elapsed_min"])
+    return out
+
+
 def _clean_line(s):
     s = re.sub(r"[*#`>]{1,}", "", s)
     return re.sub(r"\s+", " ", s).strip()
@@ -249,6 +289,25 @@ def send_notification(webhook, title, summary):
     return False, "none", "no channel"
 
 
+PR_PROBE_PATH = os.path.join(BASE, "pr_probe.jsonl")
+
+
+def _probe_permission_payload(payload):
+    """PermissionRequest payload 探针（本地文件，保留最近 20 条）：卡片"多选"要能落地，
+    必须先看清真实 payload 里到底带不带选项、什么形状——AskUserQuestion 是独立工具，
+    是否触发 PermissionRequest 尚未实测，不能凭猜设计。绝不抛错、不影响决策主流程。"""
+    try:
+        lines = []
+        if os.path.exists(PR_PROBE_PATH):
+            with open(PR_PROBE_PATH, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        lines.append(json.dumps(payload, ensure_ascii=False))
+        with open(PR_PROBE_PATH, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines[-20:]) + "\n")
+    except Exception:
+        pass
+
+
 def _cleanup_pending(max_age_s=3600):
     """清理 worker 崩溃遗留的 payload 临时文件（>1 小时）。"""
     try:
@@ -281,6 +340,7 @@ def main():
     # PermissionRequest：优先手机卡片批准/拒绝（阻塞流，超时或连接器不在线自动降级）；
     # approve_flow 内部有「人在电脑前」检测——刚用过键鼠就不走手机，桌面弹窗即时出现
     if event == "PermissionRequest":
+        _probe_permission_payload(payload)
         decision = "fallback"
         try:
             import approve_flow

@@ -22,7 +22,8 @@ sys.path.insert(0, BASE)
 from aiohttp import web  # noqa: E402
 from aibot import WSClient, WSClientOptions  # noqa: E402
 from notify import (log, load_json, mute_for_minutes, mute_remaining_min,  # noqa: E402
-                    notifications_enabled, parse_mute_minutes, sender_allowed, update_state)
+                    notifications_enabled, parse_mute_minutes, running_sessions,
+                    sender_allowed, update_state)
 
 CFG = json.load(open(os.path.join(BASE, "aibot_config.json"), encoding="utf-8"))
 DECISIONS_DIR = os.path.join(BASE, "decisions")
@@ -87,6 +88,7 @@ STATE_PATH = os.path.join(BASE, "state.json")
 HELP_TEXT = (
     "📖 可用指令\n"
     "状态 — 通知开关 / 连接器是否在线\n"
+    "在跑 — 列出正在运行的会话及各自已跑多久\n"
     "静默 / 恢复 — 手动开关全部通知\n"
     "静默 30 — 定时静默 30 分钟，到点自动恢复\n"
     "最近 — 看最近 3 条推送\n"
@@ -134,6 +136,24 @@ def _recent_text(n=3):
     return "\n".join(out)
 
 
+def _running_text():
+    """「在跑」：列出正在运行的会话及各自已跑多久。
+
+    数据源是心跳锁（进程活着=回合还在跑），不是 turn_usage——那表只有回合结束后才写入。
+    注意：会话需在本功能上线后**提交过一次消息**（心跳才会写带 session_id 的新格式锁），
+    在此之前它虽在跑但不可见，属已知限制。
+    """
+    rows = running_sessions()
+    if not rows:
+        return "▶️ 当前没有在运行的会话。"
+    out = [f"▶️ 正在运行 {len(rows)} 个会话"]
+    for r in rows:
+        mins = r["elapsed_min"]
+        dur = f"{mins} 分钟" if mins < 60 else f"{mins // 60} 小时 {mins % 60} 分"
+        out.append(f"· {r['title']}（已跑 {dur}）")
+    return "\n".join(out)
+
+
 def handle_command(content):
     """返回回复文本；None = 非指令（如首次激活消息），不回复。"""
     t = content.strip()
@@ -144,6 +164,8 @@ def handle_command(content):
         return "🔔 已恢复通知。"
     if t in ("状态", "status"):
         return _status_text()
+    if t in ("在跑", "运行中", "正在跑", "有哪些会话", "running"):
+        return _running_text()
     if t in ("最近", "最近通知", "推送记录"):
         return _recent_text()
     minutes = parse_mute_minutes(t)

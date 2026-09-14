@@ -116,9 +116,11 @@ def _pid_alive(pid):
     return True
 
 
-def acquire_lock(session_id, max_age_s):
+def acquire_lock(session_id, max_age_s, turn_id=""):
     """同会话单实例锁：已有活着的同会话心跳 → False（防多条「⏳」重复推送）。
-    锁的持有进程已死或超时（> 1.5x 最大跟踪时长）则接管。"""
+    锁的持有进程已死或超时（> 1.5x 最大跟踪时长）则接管。
+    锁里额外存 session_id/turn_id：微信「在跑」指令靠它列出运行中的会话
+    （锁文件名是 session_id 的哈希，不可逆，所以必须写进内容）。"""
     path = _lock_path(session_id)
     existing = load_json(path, {})
     pid = existing.get("pid")
@@ -126,7 +128,8 @@ def acquire_lock(session_id, max_age_s):
     if pid and _pid_alive(int(pid)) and time.time() - started < max_age_s * 1.5:
         return False
     with open(path, "w", encoding="utf-8") as f:
-        json.dump({"pid": os.getpid(), "started": time.time()}, f)
+        json.dump({"pid": os.getpid(), "started": time.time(),
+                   "session_id": session_id, "turn_id": turn_id}, f)
     return True
 
 
@@ -157,7 +160,7 @@ def main():
         hb_log({"ts": time.time(), "exit": "no turn id in payload", "session_id": session_id})
         return 0
 
-    if not acquire_lock(session_id, max_minutes):
+    if not acquire_lock(session_id, max_minutes, turn_id):
         hb_log({"ts": time.time(), "exit": "another heartbeat running", "session_id": session_id})
         return 0
 
