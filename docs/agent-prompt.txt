@@ -1,7 +1,8 @@
 帮我在**这台电脑**上装好「ZCode 任务通知」——让 ZCode 的任务完成/出错/需要确认时，自动推送到我的手机企业微信。
 
 仓库：https://github.com/Lyn-Linyanhe/zcode-task-notify
-执行手册：仓库根目录的 AGENTS.md（如果你打不开网页，先把仓库 clone 或下载下来再读）
+执行手册：https://github.com/Lyn-Linyanhe/zcode-task-notify/blob/main/AGENTS.md
+（打不开 github 的话：先把仓库 clone 或下载 ZIP 解压到本地，再读里面的 AGENTS.md）
 
 请按 AGENTS.md 里的「A. 安装执行手册」执行，注意：
 
