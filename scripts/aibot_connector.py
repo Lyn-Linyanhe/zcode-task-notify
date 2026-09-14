@@ -225,7 +225,13 @@ async def on_card_click(frame):
         if not decision:
             return
         os.makedirs(DECISIONS_DIR, exist_ok=True)
-        with open(os.path.join(DECISIONS_DIR, task_id + ".json"), "w", encoding="utf-8") as f:
+        decision_path = os.path.join(DECISIONS_DIR, task_id + ".json")
+        if os.path.exists(decision_path):
+            # 幂等：结果卡仍保留按钮（保持 button_interaction 是绕开 42045 的代价），
+            # 因此同一 task_id 可能被重复点击——只认第一次，不重复写盘、不重复更新卡片。
+            log({"ts": time.time(), "decision_dup": key, "task_id": task_id})
+            return
+        with open(decision_path, "w", encoding="utf-8") as f:
             json.dump({"decision": decision, "ts": time.time()}, f)
         label = "✅ 已批准" if decision == "allow" else "❌ 已拒绝"
         try:
