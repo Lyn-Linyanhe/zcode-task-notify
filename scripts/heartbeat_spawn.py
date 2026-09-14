@@ -14,7 +14,11 @@ from notify import (load_json, log, bot_session_ids,  # noqa: E402
                     STATE_PATH, BOT_STATE)
 
 PROBE_PATH = os.path.join(BASE, "usp_probe.jsonl")
-DETACHED = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+# 子进程创建标志。不能用 DETACHED_PROCESS：.venv 的 python.exe 是启动器存根，它转手
+# 拉起真实解释器时不传该标志，于是没有控制台的父进程会让系统新建控制台，Win11 默认
+# 终端（Windows Terminal）就弹出一个窗口——标题是存根路径，看着像 bug 报告。
+# CREATE_NO_WINDOW 给一个不可见的控制台，实测无窗口（2026-09-14 四组对照实验）。
+NOWINDOW = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
 
 # 已知毒键：出现在 cli/config.json 顶层会让整个 hooks 配置静默失效（2026-09-13/14 两次实测）
 POISON_CFG = os.path.expanduser("~/.zcode/cli/config.json")
@@ -47,7 +51,7 @@ def self_heal_config(session_id):
                        "removed_keys": removed, "ts": time.time()}, f, ensure_ascii=False)
         subprocess.Popen(
             [sys.executable, os.path.join(BASE, "push_worker.py"), pf],
-            creationflags=DETACHED, cwd=BASE,
+            creationflags=NOWINDOW, cwd=BASE,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True)
     except Exception as e:
@@ -73,7 +77,7 @@ def ensure_connector():
     try:
         subprocess.Popen(
             [venv, os.path.join(BASE, "aibot_connector.py")],
-            creationflags=DETACHED, cwd=BASE,
+            creationflags=NOWINDOW, cwd=BASE,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True)
         log({"ts": time.time(), "connector_spawn": True})
@@ -120,7 +124,7 @@ def main():
     try:
         subprocess.Popen(
             [sys.executable, os.path.join(BASE, "heartbeat.py"), session_id],
-            creationflags=DETACHED, cwd=BASE,
+            creationflags=NOWINDOW, cwd=BASE,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True)
     except Exception as e:
