@@ -12,6 +12,7 @@ import sys
 import subprocess
 import time
 import urllib.request
+import urllib.error
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE, "config.json")
@@ -72,13 +73,37 @@ def sender_allowed(uid, owner, chattype):
     return chattype == "single"
 
 
+_TASK_ID_RE = re.compile(r"^zc-[A-Za-z0-9_.\-]{1,64}$")
+
+
+def safe_task_id(task_id):
+    """卡片 task_id 白名单：只允许 zc- 前缀 + 字母数字 _.-，长度封顶。
+
+    堵住路径穿越——连接器把 task_id 直接拼进 decisions/<task_id>.json 落盘，
+    旧代码只查 startswith("zc-")，`zc-../../state` 能过前缀检查、点卡后把决定写到
+    decisions 之外。这里不含分隔符 / \\ ，穿越串一律拒；approve_flow 生成的
+    zc-perm_<uuid> 天然符合。返回规范化串或 None（None=拒绝）。"""
+    if isinstance(task_id, str) and _TASK_ID_RE.match(task_id):
+        return task_id
+    return None
+
+
+def _atomic_write_json(path, data):
+    """临时文件 + os.replace 原子替换：读者永远只会看到完整旧文件或完整新文件，
+    不会读到 open("w") 截断后的半截 JSON（并发/崩溃时 state.json 被读成 default
+    会让"静默中"的通知瞬间复活）。"""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
 def update_state(**fields):
-    """读-改-写 state.json（静默/恢复都走这里，格式统一）。"""
+    """读-改-写 state.json（静默/恢复都走这里，格式统一）。原子替换见 _atomic_write_json。"""
     state = load_json(STATE_PATH, {"enabled": True})
     state.update(fields)
     state["updated"] = time.strftime("%Y-%m-%d %H:%M")
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=1)
+    _atomic_write_json(STATE_PATH, state)
     return state
 
 
@@ -248,7 +273,9 @@ def send_wecom(webhook, title, summary):
 
 def _try_aibot(title, summary):
     """机器人通道：连接器 /notify 在线且已捕获目标 → (True, "ok")，否则 (False, 原因)。
-    原因会写进降级提示里，方便一眼看出是没配置、没绑用户还是连接器挂了。"""
+    原因会写进降级提示里，方便一眼看出是没配置、没绑用户还是连接器挂了。
+    非 2xx 走 HTTPError 分支：连接器进程活着只是拒了这条/ws 掉线——读响应体里的
+    error 字段回填原因，别误报成"离线"（审计 P2：文案把用户引向错误动作）。"""
     try:
         cfg_path = os.path.join(BASE, "aibot_config.json")
         if not os.path.exists(cfg_path):
@@ -260,14 +287,24 @@ def _try_aibot(title, summary):
             return False, "未绑定用户（先在微信里给机器人发一条消息）"
         port = int(cfg.get("local_port", 17899))
         body = {"title": title, "content": f"**{title}**\n{summary}"}
+        headers = {"Content-Type": "application/json"}
+        if cfg.get("local_token"):
+            headers["X-Zcn-Token"] = cfg["local_token"]
         req = urllib.request.Request(
             f"http://127.0.0.1:{port}/notify",
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            if json.loads(resp.read().decode("utf-8")).get("ok") is True:
-                return True, "ok"
-            return False, "连接器拒绝了本条推送"
+            headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                if json.loads(resp.read().decode("utf-8")).get("ok") is True:
+                    return True, "ok"
+                return False, "连接器拒绝了本条推送"
+        except urllib.error.HTTPError as e:
+            try:
+                reason = json.loads(e.read().decode("utf-8")).get("error") or ""
+            except Exception:
+                reason = ""
+            return False, f"连接器在线但未送达（{reason or 'HTTP ' + str(e.code)}）"
     except Exception:
         return False, "连接器离线"
 

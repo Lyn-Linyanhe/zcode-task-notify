@@ -166,19 +166,26 @@ def process_payload(payload):
     elif event == "Stop":
         turn_id = payload.get("turnId") or payload.get("turn_id")
         t0 = time.time()
-        status, _err, dur_ms = turn_status(turn_id, wait_s=config.get("stop_status_wait_sec", 60))
+        status, err_code, dur_ms = turn_status(turn_id, wait_s=config.get("stop_status_wait_sec", 60))
         # 诊断：这条能区分「行还没落库」和「真没耗时」，排查耗时/❌ 缺失时先看它
         log({"ts": time.time(), "turn_status": status, "duration_ms": dur_ms,
              "waited_s": round(time.time() - t0, 1), "session_id": session_id})
         if status == "cancelled":
             return {"action": "skip", "reason": "turn cancelled by user", "session_id": session_id}
-        title = "❌ 任务出错" if status == "error" else "✅ 任务完成"
+        if status == "error":
+            title = "❌ 任务出错" + (f"（{err_code}）" if err_code else "")
+        elif status == "completed":
+            title = "✅ 任务完成"
+        else:
+            # 等满窗口行仍未落库/查询失败——状态未知时绝不冒充"完成"：
+            # error 迟落库被报成 ✅ 恰是最需要通知的场景（审计 P1）。中性标题如实说。
+            title = "ℹ️ 回合已结束（状态未确认）"
         dur = format_duration(dur_ms)
         if dur:
             title += f"（耗时 {dur}）"
         body = make_summary(payload.get("responsePreview") or payload.get("responseText") or "")
         if not body:
-            body = f"回合已结束（{status or '状态未知'}）。"
+            body = "回合已结束，未能读取数据库状态（稍后可在桌面端查看结果）。"
     else:
         title, body = f"🔔 {event}", json.dumps(payload, ensure_ascii=False)[:150]
 

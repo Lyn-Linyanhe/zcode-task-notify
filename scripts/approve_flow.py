@@ -30,10 +30,14 @@ def _input_preview(tool_input):
 
 
 def _post_card(port, body, timeout=5):
+    headers = {"Content-Type": "application/json"}
+    token = _cfg().get("local_token") or ""   # 连接器启动时生成的本地共享密钥
+    if token:
+        headers["X-Zcn-Token"] = token
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/card",
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json"})
+        headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8")).get("ok") is True
 

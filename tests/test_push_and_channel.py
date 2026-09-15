@@ -5,6 +5,7 @@
 - 耗时/❌ 从不出现：Stop hook 触发时 turn_usage 行还没写入，轮询只判 running 会一次都不等。
 - 降级到群机器人后毫无提示：群机器人是单向的，用户会拿它当智能机器人去回复指令。
 """
+import io
 import json
 import os
 import sys
@@ -178,6 +179,118 @@ class TestMuteAndGate(unittest.TestCase):
                 self.assertEqual(nt.mute_remaining_min(state, now=1000.0), 30)
                 # 到点自动恢复，无需任何清理
                 self.assertEqual(nt.notifications_enabled(state, now=1000.0 + 1801), (True, "on"))
+
+
+class TestSafeTaskId(unittest.TestCase):
+    """task_id 直接拼进 decisions/<task_id>.json 落盘，旧代码只查前缀 → 路径穿越（审计 P1）。"""
+
+    def test_accepts_normal_ids(self):
+        self.assertEqual(nt.safe_task_id("zc-perm_d964066e-f806-4812"), "zc-perm_d964066e-f806-4812")
+        self.assertEqual(nt.safe_task_id("zc-test-1"), "zc-test-1")
+
+    def test_rejects_traversal_and_junk(self):
+        for bad in ("zc-../../state", "zc-..\\..\\x", "zc-", "zc-" + "A" * 200,
+                    "zc-a/b", "zc-a b", "notzc-x", "", None, 123):
+            self.assertIsNone(nt.safe_task_id(bad), f"应拒绝 {bad!r}")
+
+
+class TestAtomicWrite(unittest.TestCase):
+    def test_replaces_file_without_leaving_partial(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "s.json")
+            nt._atomic_write_json(path, {"enabled": True, "n": 1})
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f)["n"], 1)
+            nt._atomic_write_json(path, {"enabled": False, "n": 2})
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f)["n"], 2)
+            self.assertFalse(os.path.exists(path + ".tmp"), "临时文件应被 replace 掉")
+
+
+class TestStopTitleNeutral(unittest.TestCase):
+    """状态未确认时不得冒充"完成"（审计 P1：error 迟落库被报成 ✅ 恰是最需要通知的场景）。"""
+
+    def _title_with_status(self, status, err=None, dur=60000):
+        payload = {"hookEventName": "Stop", "session_id": "sess_x", "turnId": "turn_x",
+                   "responsePreview": "结果内容"}
+        with mock.patch.object(pw, "turn_status", lambda *a, **k: (status, err, dur)), \
+                mock.patch.object(pw, "notifications_enabled", lambda s: (True, "on")), \
+                mock.patch.object(pw, "load_json", lambda p, d=None: {"webhook": "x"}), \
+                mock.patch.object(pw, "bot_session_ids", lambda: set()), \
+                mock.patch.object(pw, "get_session_title", lambda s: s), \
+                mock.patch.object(pw, "log", lambda e: None):
+            return pw.process_payload(payload)
+
+    def test_error_title_carries_error_code(self):
+        title = self._title_with_status("error", "MODEL_ERROR")["title"]
+        self.assertIn("❌", title)
+        self.assertIn("MODEL_ERROR", title)
+
+    def test_completed_title(self):
+        self.assertIn("✅", self._title_with_status("completed")["title"])
+
+    def test_unknown_status_is_neutral_not_completed(self):
+        title = self._title_with_status(None)["title"]
+        self.assertNotIn("✅", title)
+        self.assertIn("未确认", title)
+
+    def test_cancelled_skipped(self):
+        self.assertEqual(self._title_with_status("cancelled")["action"], "skip")
+
+
+class TestTryAibotReason(unittest.TestCase):
+    """降级原因要区分"在线但拒绝"与"真离线"（审计 P2 文案错位），且必须带本地密钥头。"""
+
+    def _cfg(self):
+        return {"bot_id": "b", "target_userid": "u", "local_port": 17899, "local_token": "tk"}
+
+    def _run(self, urlopen_side):
+        with mock.patch.object(nt.os.path, "exists", lambda p: True), \
+                mock.patch.object(nt, "load_json", lambda p, d=None: self._cfg()), \
+                mock.patch.object(nt.urllib.request, "urlopen", urlopen_side):
+            return nt._try_aibot("t", "s")
+
+    def test_http_error_reports_online_but_rejected(self):
+        import urllib.error
+
+        def boom(req, timeout=None):
+            raise urllib.error.HTTPError("http://x", 503, "Service Unavailable", {},
+                                         io.BytesIO(b'{"error": "ws offline"}'))
+
+        ok, reason = self._run(boom)
+        self.assertFalse(ok)
+        self.assertIn("在线但未送达", reason)
+        self.assertIn("ws offline", reason)
+
+    def test_connection_error_reports_offline(self):
+        import urllib.error
+
+        def boom(req, timeout=None):
+            raise urllib.error.URLError("connection refused")
+
+        self.assertEqual(self._run(boom), (False, "连接器离线"))
+
+    def test_sends_token_header(self):
+        seen = {}
+
+        class FakeResp:
+            def read(self):
+                return b'{"ok": true}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake(req, timeout=None):
+            seen["token"] = req.get_header("X-zcn-token")
+            return FakeResp()
+
+        ok, _ = self._run(fake)
+        self.assertTrue(ok)
+        self.assertEqual(seen["token"], "tk", "必须带本地共享密钥头")
 
 
 if __name__ == "__main__":

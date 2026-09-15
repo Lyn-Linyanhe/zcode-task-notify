@@ -11,7 +11,8 @@ import time
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(BASE, "scripts"))
-from notify import load_json, send_wecom_once  # noqa: E402
+from notify import (load_json, send_wecom_once, notifications_enabled,  # noqa: E402
+                    mute_remaining_min)
 
 # 兼容两种目录布局：仓库布局（scripts/ 子目录）与生产实例布局（扁平）
 _CANDIDATE_DIRS = [os.path.join(BASE, "scripts"), BASE, os.path.expanduser("~/.zcode/task-notify")]
@@ -68,10 +69,17 @@ def main():
         zc = None
     check("ZCode 桌面端运行中", bool(zc), "桌面端没开——通知链路整体下线", warn=(zc is None))
 
-    # 4. 开关
+    # 4. 开关（含定时静默：enabled=true 但 mute_until 在未来时实际全静默，
+    #    只看 enabled 会报 PASS 把"收不到通知"的排查引偏——审计 P2）
     state = load_json(find_file("state.json") or "", {})
-    check("推送开关已开启", bool(state.get("enabled", True)),
-          "state.json 的 enabled 为 false")
+    ok_notify, why = notifications_enabled(state)
+    if ok_notify:
+        check("推送开关已开启", True, "")
+    elif why == "muted":
+        left = mute_remaining_min(state)
+        check("推送开关已开启", False, f"定时静默中（还有约 {left} 分钟自动恢复；发「恢复」立即结束）", warn=True)
+    else:
+        check("推送开关已开启", False, "state.json 的 enabled 为 false（手动静默，发「恢复」开启）")
 
     # 5. webhook 配置
     cfg, cfg_path = find_config()

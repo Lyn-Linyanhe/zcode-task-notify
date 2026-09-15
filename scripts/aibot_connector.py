@@ -23,15 +23,47 @@ from aiohttp import web  # noqa: E402
 from aibot import WSClient, WSClientOptions  # noqa: E402
 from notify import (log, load_json, mute_for_minutes, mute_remaining_min,  # noqa: E402
                     notifications_enabled, parse_mute_minutes, running_sessions,
-                    sender_allowed, update_state)
+                    safe_task_id, sender_allowed, update_state, _atomic_write_json)
 
 CFG = json.load(open(os.path.join(BASE, "aibot_config.json"), encoding="utf-8"))
 DECISIONS_DIR = os.path.join(BASE, "decisions")
 TASK_PREFIX = "zc-"
 
 
+def ensure_local_token():
+    """本地 HTTP 共享密钥：连接器首次启动生成并持久化到 aibot_config.json，
+    hook 侧（approve_flow/_try_aibot）从同一文件读取、随请求带 X-Zcn-Token 头。
+    堵两类面：① 恶意网页对 127.0.0.1 的 drive-by POST（自定义头强制预检，必失败）；
+    ② 本机其他进程伪造卡片/刷推送（读不到仅本用户可读的配置文件就配不出正确头）。"""
+    if not CFG.get("local_token"):
+        import secrets
+        CFG["local_token"] = secrets.token_hex(16)
+        try:
+            _atomic_write_json(os.path.join(BASE, "aibot_config.json"), CFG)
+        except Exception as e:
+            log({"ts": time.time(), "error": f"token persist: {e}"})
+    return CFG.get("local_token")
+
+
+def _authorized(request):
+    """写端点鉴权：token 必须匹配；浏览器请求（带 Origin）还须来源是本机。"""
+    token = CFG.get("local_token") or ""
+    if not token or request.headers.get("X-Zcn-Token", "") != token:
+        return False
+    origin = request.headers.get("Origin", "")
+    if origin:
+        port = int(CFG.get("local_port", 17899))
+        if origin not in (f"http://127.0.0.1:{port}", f"http://localhost:{port}"):
+            return False
+    return True
+
+
 def acquire_lock():
-    """单实例锁：文件独占创建 + PID 存活校验（防并发双实例互踢长连接）。"""
+    """单实例锁：文件独占创建 + PID 存活校验（防并发双实例互踢长连接）。
+    仅在锁内容损坏（崩溃留下的 0 字节/半截 JSON）、无 pid、或 pid 已死时接管；
+    pid 存活就绝不接管——连接器是常驻进程，锁 mtime 会越来越旧是正常态，
+    绝不能用"超龄"判陈旧（那会让第二个实例抢走健康连接器的锁，双实例互踢）。
+    旧实现的 bug 是：读锁抛异常时直接 return False 且不清理 → 一次损坏永久挡死启动。"""
     path = os.path.join(BASE, "aibot_connector.lock")
     for _ in range(2):
         try:
@@ -39,19 +71,25 @@ def acquire_lock():
                 json.dump({"pid": os.getpid(), "started": time.time()}, f)
             return True
         except FileExistsError:
+            takeover = False
             try:
                 with open(path, encoding="utf-8") as f:
                     pid = json.load(f).get("pid")
-                if pid:
+                if not pid:
+                    takeover = True  # 无 pid 字段：损坏
+                else:
                     k32 = ctypes.windll.kernel32
                     h = k32.OpenProcess(0x1000, False, int(pid))
                     if h:
                         k32.CloseHandle(h)
-                        return False  # 活实例在跑
+                        return False  # 活实例在跑，绝不抢
+                    takeover = True   # pid 已死：残留锁
             except Exception:
-                return False  # 锁文件读不了且被占用 → 宁可退出
+                takeover = True       # 半截/空 JSON：损坏锁，接管而非退出
+            if not takeover:
+                return False
             try:
-                os.remove(path)  # 死实例残留的锁，清掉重试
+                os.remove(path)
             except OSError:
                 return False
     return False
@@ -187,20 +225,24 @@ def handle_command(content):
     if minutes == 0:
         _set_enabled(False)
         return "🔇 已静默——不再推送任何通知（含权限卡片）。发「恢复」重新开启。"
+    # 手动静默（enabled=false）优先于定时静默：此时写 mute_until 到点也不会恢复，
+    # 不能对用户承诺"自动恢复"（审计 P2）。
+    if not load_json(STATE_PATH, {"enabled": True}).get("enabled", True):
+        return "🔇 当前已是手动静默（不会自动恢复）。发「恢复」后再发「静默 N」才是定时静默。"
     until = time.strftime("%H:%M", time.localtime(time.time() + minutes * 60))
     mute_for_minutes(minutes)
     return f"🔇 已静默 {minutes} 分钟（{until} 自动恢复）。想提前结束发「恢复」。"
 
 
 def _capture_target(uid):
-    """首次单聊：记下主人 userid（免去手填），同时作为指令鉴权依据。"""
+    """首次单聊：记下主人 userid（免去手填），同时作为指令鉴权依据。
+    原子替换：读者（approve_flow/_try_aibot）不会看到 open("w") 截断后的半截配置。"""
     CFG["target_userid"] = uid
     try:
         path = os.path.join(BASE, "aibot_config.json")
-        cfg = json.load(open(path, encoding="utf-8"))
+        cfg = load_json(path, {})
         cfg["target_userid"] = uid
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=1)
+        _atomic_write_json(path, cfg)
         log({"ts": time.time(), "target_captured": uid[:10] + "…"})
         print(f"已捕获单聊目标: {uid[:10]}…", flush=True)
     except Exception as e:
@@ -245,6 +287,8 @@ async def h_health(request):
 
 async def h_notify(request):
     """hook/worker → 连接器：日常通知经机器人单聊推送。body: {title, content}"""
+    if not _authorized(request):
+        return web.json_response({"ok": False, "error": "unauthorized"}, status=403)
     try:
         data = await request.json()
     except Exception:
@@ -264,14 +308,15 @@ async def h_notify(request):
 
 async def h_card(request):
     """hook 进程 → 连接器：发权限卡片。body: {task_id, title, desc}"""
+    if not _authorized(request):
+        return web.json_response({"ok": False, "error": "unauthorized"}, status=403)
     try:
         data = await request.json()
     except Exception:
         return web.json_response({"ok": False, "error": "bad json"}, status=400)
-    task_id = str(data.get("task_id") or "")
-    if not task_id.startswith(TASK_PREFIX):
-        return web.json_response({"ok": False, "error": "task_id must start with " + TASK_PREFIX},
-                                 status=400)
+    task_id = safe_task_id(data.get("task_id"))
+    if not task_id:
+        return web.json_response({"ok": False, "error": "bad task_id"}, status=400)
     if not ws.is_connected:
         return web.json_response({"ok": False, "error": "ws offline"}, status=503)
     if not CFG.get("target_userid"):
@@ -301,8 +346,9 @@ async def on_card_click(frame):
     try:
         body = frame.get("body") or {}
         ev = (body.get("event") or {}).get("template_card_event") or {}
-        key, task_id = ev.get("event_key"), str(ev.get("task_id") or "")
-        if not task_id.startswith(TASK_PREFIX):
+        key, raw_task = ev.get("event_key"), ev.get("task_id")
+        task_id = safe_task_id(raw_task)
+        if not task_id:
             return
         os.makedirs(DECISIONS_DIR, exist_ok=True)
         decision_path = os.path.join(DECISIONS_DIR, task_id + ".json")
@@ -329,8 +375,7 @@ async def on_card_click(frame):
             decision = {"decision": d}
             label = "✅ 已批准" if d == "allow" else "❌ 已拒绝"
             style = 1 if d == "allow" else 2
-        with open(decision_path, "w", encoding="utf-8") as f:
-            json.dump({**decision, "ts": time.time()}, f)
+        _atomic_write_json(decision_path, {**decision, "ts": time.time()})
         try:
             # 官方要求：更新时保持 card_type 不变（button_interaction），
             # 把按钮改为完成态文案；换 text_notice 会报 42045。
@@ -353,6 +398,7 @@ async def on_card_click(frame):
 async def main():
     os.makedirs(DECISIONS_DIR, exist_ok=True)
     cleanup_decisions()
+    ensure_local_token()   # 先落盘 token，hook 侧才可能带上正确的鉴权头
     await ws.connect()
     app = web.Application()
     app.router.add_get("/health", h_health)
