@@ -71,15 +71,28 @@ def cleanup_decisions(max_age_s=900):
 ws = WSClient(WSClientOptions(bot_id=CFG["bot_id"], secret=CFG["secret"]))
 
 
-def build_card(task_id, title, desc):
+def build_card(task_id, title, desc, options=None):
+    """options=None → 批准/拒绝二选一；否则为 [{key,text},…] 多选卡。
+    button_interaction 的按钮数上限未见于文档，多选按 ≤5 控制（实测验证）。"""
+    if options:
+        buttons = [{"key": str(o.get("key") or f"opt{i}"), "text": str(o.get("text") or f"选项{i+1}")}
+                   for i, o in enumerate(options[:5])]
+    else:
+        buttons = [{"key": "approve", "text": "✅ 批准"}, {"key": "deny", "text": "❌ 拒绝"}]
     return {"msgtype": "template_card", "template_card": {
         "card_type": "button_interaction",
         "main_title": {"title": f"⏸️ {title}"},
         "sub_title_text": desc,
         "task_id": task_id,
-        "button_list": [{"key": "approve", "text": "✅ 批准"},
-                        {"key": "deny", "text": "❌ 拒绝"}],
+        "button_list": buttons,
     }}
+
+
+# 发出去卡片的选择映射（task_id → {title, options}）。
+# title 用于结果卡保留原标题（原位更新是整卡替换，不带回去会话名就丢了）；
+# options 为多选卡的 {key: text}，点击回流时还原选项文案。
+# 连接器单进程内存即可：卡片决策窗口只有 ~100 秒，重启后旧卡本就该失效。
+TASK_META = {}
 
 
 STATE_PATH = os.path.join(BASE, "state.json")
@@ -266,10 +279,15 @@ async def h_card(request):
             {"ok": False, "error": "target_userid 未捕获——先给机器人发一条单聊消息"},
             status=503)
     try:
-        await ws.send_message(CFG["target_userid"],
-                              build_card(task_id, data.get("title") or "ZCode 请求确认",
-                                         data.get("desc") or ""))
-        log({"ts": time.time(), "card_sent": task_id})
+        title = str(data.get("title") or "ZCode 请求确认")
+        options = data.get("options")
+        card = build_card(task_id, title, data.get("desc") or "", options)
+        buttons = card["template_card"]["button_list"]
+        TASK_META[task_id] = {"title": title,
+                              "options": {b["key"]: b["text"] for b in buttons} if options else None}
+        await ws.send_message(CFG["target_userid"], card)
+        log({"ts": time.time(), "card_sent": task_id,
+             "multi": bool(options), "buttons": len(buttons)})
         return web.json_response({"ok": True})
     except Exception as e:
         log({"ts": time.time(), "error": f"card send: {e}"})
@@ -284,33 +302,48 @@ async def on_card_click(frame):
         key, task_id = ev.get("event_key"), str(ev.get("task_id") or "")
         if not task_id.startswith(TASK_PREFIX):
             return
-        decision = {"approve": "allow", "deny": "deny"}.get(key)
-        if not decision:
-            return
         os.makedirs(DECISIONS_DIR, exist_ok=True)
         decision_path = os.path.join(DECISIONS_DIR, task_id + ".json")
         if os.path.exists(decision_path):
             # 幂等：结果卡仍保留按钮（保持 button_interaction 是绕开 42045 的代价），
             # 因此同一 task_id 可能被重复点击——只认第一次，不重复写盘、不重复更新卡片。
+            # 先查决定文件再取元数据，重复点击也能正常记 decision_dup（元数据照样回收）。
+            TASK_META.pop(task_id, None)
             log({"ts": time.time(), "decision_dup": key, "task_id": task_id})
             return
+        meta = TASK_META.pop(task_id, None) or {}
+        orig_title, options = meta.get("title") or "", meta.get("options")
+        if options:
+            # 多选卡：event_key 即选项 key，还原选项文案写进决定文件。
+            # （approve_flow 目前只认 allow/deny；"选项如何回注 ZCode"等真实
+            #  PermissionRequest 样本定案——见 pr_probe.jsonl 探针。）
+            decision = {"choice": options.get(key, str(key)), "key": key}
+            label = f"🔘 已选择：{decision['choice']}"
+            style = 1
+        else:
+            d = {"approve": "allow", "deny": "deny"}.get(key)
+            if not d:
+                return
+            decision = {"decision": d}
+            label = "✅ 已批准" if d == "allow" else "❌ 已拒绝"
+            style = 1 if d == "allow" else 2
         with open(decision_path, "w", encoding="utf-8") as f:
-            json.dump({"decision": decision, "ts": time.time()}, f)
-        label = "✅ 已批准" if decision == "allow" else "❌ 已拒绝"
+            json.dump({**decision, "ts": time.time()}, f)
         try:
             # 官方要求：更新时保持 card_type 不变（button_interaction），
-            # 把按钮改为完成态文案；换 text_notice 会报 42045
+            # 把按钮改为完成态文案；换 text_notice 会报 42045。
+            # 原位更新=整卡替换：原标题（含会话名）必须带回去，不然决定后看不出是哪件事。
             await ws.update_template_card(frame, {
                 "card_type": "button_interaction",
-                "main_title": {"title": f"{label}（手机决定）",
-                               "desc": "决定已同步给 ZCode"},
-                "button_list": [{"key": key or "done",
-                                 "text": label, "style": 1 if decision == "allow" else 2}],
+                "main_title": {"title": orig_title or label,
+                               "desc": f"{label} · 决定已同步给 ZCode"},
+                "button_list": [{"key": key or "done", "text": label, "style": style}],
                 "task_id": task_id,
             })
         except Exception as e:
             log({"ts": time.time(), "error": f"card update: {e}"})
-        log({"ts": time.time(), "decision": decision, "task_id": task_id})
+        log({"ts": time.time(), "decision": decision.get("decision") or decision.get("choice"),
+             "key": key, "task_id": task_id})
     except Exception as e:
         log({"ts": time.time(), "error": f"card click: {e}"})
 

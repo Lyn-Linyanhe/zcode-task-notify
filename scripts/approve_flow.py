@@ -91,14 +91,16 @@ def run(payload):
         title = get_session_title(session_id) if session_id else ""
     except Exception:
         title = ""
-    desc = f"会话：{title}\n工具：{tool}\n输入：{_input_preview(payload.get('tool_input') or payload.get('toolInput'))}"
+    # 会话名进标题：微信通知预览/聊天列表只显示标题行，放正文里等于没有
+    card_title = f"{title} · 请求确认" if title else "ZCode 请求确认"
+    desc = f"工具：{tool}\n输入：{_input_preview(payload.get('tool_input') or payload.get('toolInput'))}"
     if reason:
         desc += f"\n原因：{reason}"
 
     if not _health(port):
         return "fallback"
     try:
-        if not _post_card(port, {"task_id": task_id, "title": "ZCode 请求确认", "desc": desc}):
+        if not _post_card(port, {"task_id": task_id, "title": card_title, "desc": desc}):
             return "fallback"
     except Exception:
         return "fallback"
