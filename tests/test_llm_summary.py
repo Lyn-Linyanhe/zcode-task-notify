@@ -41,10 +41,11 @@ class TestLlmTimeout(unittest.TestCase):
             out = pw.llm_summary("正文内容", cfg)
         return out, seen
 
-    def test_default_timeout_is_ten_seconds(self):
+    def test_default_timeout_is_fifteen_seconds(self):
         out, seen = self._run(_cfg())
         self.assertEqual(out, "摘要")
-        self.assertEqual(seen["timeout"], 10, "旧值 25 秒会让每条超时的通知白等 25 秒")
+        self.assertEqual(float(seen["timeout"]), 15,
+                         "25 秒白等太久；10 秒会误杀 12 秒档的成功样本；经实测与用户确认定 15")
 
     def test_timeout_is_configurable(self):
         _out, seen = self._run(_cfg(llm_timeout_sec=4))

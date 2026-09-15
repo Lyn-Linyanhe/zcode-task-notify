@@ -102,9 +102,10 @@ def llm_summary(text, cfg):
     if not key:
         return None
 
-    # 摘要只影响通知的"可读性"，不该拖慢通知本身：超时默认 10 秒（旧值 25 秒，
-    # 实测 39 次尝试里 9 次跑满 25 秒读超时后仍回退启发式——白等 25 秒）。
-    timeout_s = float(cfg.get("llm_timeout_sec", 10))
+    # 摘要只影响通知的"可读性"，不该拖慢通知本身：超时默认 15 秒（旧值写死 25 秒，
+    # 实测 39 次尝试里 9 次跑满 25 秒读超时后仍回退启发式——白等 25 秒；后收紧到 10 秒，
+    # 但成功样本有 8.9s/12.0s 两档，10 秒会误杀慢摘要，经用户确认定 15 秒）。
+    timeout_s = float(cfg.get("llm_timeout_sec", 15))
     t0 = time.time()
     try:
         if fmt == "anthropic":
