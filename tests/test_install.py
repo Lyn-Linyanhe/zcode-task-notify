@@ -19,7 +19,7 @@ sys.path.insert(0, ROOT)
 
 import install  # noqa: E402
 
-GOOD = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=bf230347-d74d-497b-a4c5-62f52793d037"
+GOOD = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=11112222-3333-4444-5555-666677778888"
 
 
 class TestWebhookValidation(unittest.TestCase):
@@ -29,7 +29,7 @@ class TestWebhookValidation(unittest.TestCase):
 
     def test_rejects_bot_id_or_bare_key(self):
         self.assertFalse(install.looks_like_webhook("aib4Xk2pQ9wZ"))
-        self.assertFalse(install.looks_like_webhook("bf230347-d74d-497b-a4c5-62f52793d037"))
+        self.assertFalse(install.looks_like_webhook("11112222-3333-4444-5555-666677778888"))
         self.assertFalse(install.looks_like_webhook(""))
         self.assertFalse(install.looks_like_webhook(None))
 
