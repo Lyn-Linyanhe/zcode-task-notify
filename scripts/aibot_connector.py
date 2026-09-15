@@ -284,7 +284,9 @@ async def h_card(request):
         card = build_card(task_id, title, data.get("desc") or "", options)
         buttons = card["template_card"]["button_list"]
         TASK_META[task_id] = {"title": title,
-                              "options": {b["key"]: b["text"] for b in buttons} if options else None}
+                              "options": ({str(o.get("key") or f"opt{i}"):
+                                           str(o.get("label") or o.get("text") or f"选项{i+1}")
+                                           for i, o in enumerate(options[:5])} if options else None)}
         await ws.send_message(CFG["target_userid"], card)
         log({"ts": time.time(), "card_sent": task_id,
              "multi": bool(options), "buttons": len(buttons)})
@@ -314,9 +316,9 @@ async def on_card_click(frame):
         meta = TASK_META.pop(task_id, None) or {}
         orig_title, options = meta.get("title") or "", meta.get("options")
         if options:
-            # 多选卡：event_key 即选项 key，还原选项文案写进决定文件。
-            # （approve_flow 目前只认 allow/deny；"选项如何回注 ZCode"等真实
-            #  PermissionRequest 样本定案——见 pr_probe.jsonl 探针。）
+            # 多选卡：event_key 即选项 key，按 TASK_META 映射还原完整选项文案写进决定文件
+            # （{"choice": 完整label}）。approve_flow 读到后以 allow+updatedInput 回注
+            # AskUserQuestion 的 answers，agent 直接拿到答案继续跑。
             decision = {"choice": options.get(key, str(key)), "key": key}
             label = f"🔘 已选择：{decision['choice']}"
             style = 1

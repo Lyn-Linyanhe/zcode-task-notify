@@ -70,8 +70,44 @@ def _user_active(threshold_s=60):
         return False  # 异常 → 按不在电脑前处理（保持卡片流可用）
 
 
+def _ask_spec(payload):
+    """AskUserQuestion payload → 多选卡规格；None = 不适合（走批准/拒绝或交桌面）。
+
+    实测（pr_probe.jsonl，2026-09-15）：AskUserQuestion 会触发 PermissionRequest，
+    tool_input.questions[].options[] 带 label/description；工具的 answers 字段
+    （键=问题文本，值=选项 label）由"permission component"收集——我们就是那个组件。
+    只接单问题且非 multiSelect；多问题/多选交回桌面 UI。
+    """
+    tool = payload.get("tool_name") or payload.get("toolName") or ""
+    if tool != "AskUserQuestion":
+        return None
+    ti = payload.get("tool_input") or payload.get("toolInput") or {}
+    if not isinstance(ti, dict):
+        return None
+    qs = ti.get("questions") or []
+    if len(qs) != 1:
+        return None
+    q = qs[0] or {}
+    opts = q.get("options") or []
+    if not (2 <= len(opts) <= 5) or q.get("multiSelect"):
+        return None
+    question = str(q.get("question") or "")
+    if not question:
+        return None
+    return {"question": question,
+            "options": [{"key": "ABCDE"[i], "label": str(o.get("label") or f"选项{i+1}")}
+                        for i, o in enumerate(opts)],
+            "tool_input": ti}
+
+
 def run(payload):
-    """返回 "allow" / "deny" / None（超时） / "fallback"（连接器不可用或人在电脑前）。"""
+    """返回 decision dict / None（超时，交桌面 UI） / "fallback"（连接器不可用或人在电脑前）。
+
+    二选一卡 → {"behavior": "allow"/"deny"}；
+    AskUserQuestion 多选卡 → 用户点选项后 {"behavior": "allow",
+    "updatedInput": {原 tool_input + answers}}——ZCode 按 modify 放行，
+    agent 直接拿到答案继续跑（实测协议："Allowed with modified input"）。
+    """
     try:
         cfg = _cfg()
     except Exception:
@@ -91,16 +127,27 @@ def run(payload):
         title = get_session_title(session_id) if session_id else ""
     except Exception:
         title = ""
-    # 会话名进标题：微信通知预览/聊天列表只显示标题行，放正文里等于没有
-    card_title = f"{title} · 请求确认" if title else "ZCode 请求确认"
-    desc = f"工具：{tool}\n输入：{_input_preview(payload.get('tool_input') or payload.get('toolInput'))}"
-    if reason:
-        desc += f"\n原因：{reason}"
+
+    spec = _ask_spec(payload)
+    if spec:
+        # 会话名进标题：微信通知预览/聊天列表只显示标题行，放正文里等于没有
+        card_title = f"{title} · 请选择" if title else "ZCode 请选择"
+        mapping = "　".join(f"{o['key']}={o['label']}" for o in spec["options"])
+        desc = f"{spec['question'][:200]}\n{mapping}"
+        body = {"task_id": task_id, "title": card_title, "desc": desc,
+                "options": [{"key": o["key"], "text": o["key"], "label": o["label"]}
+                            for o in spec["options"]]}
+    else:
+        card_title = f"{title} · 请求确认" if title else "ZCode 请求确认"
+        desc = f"工具：{tool}\n输入：{_input_preview(payload.get('tool_input') or payload.get('toolInput'))}"
+        if reason:
+            desc += f"\n原因：{reason}"
+        body = {"task_id": task_id, "title": card_title, "desc": desc}
 
     if not _health(port):
         return "fallback"
     try:
-        if not _post_card(port, {"task_id": task_id, "title": card_title, "desc": desc}):
+        if not _post_card(port, body):
             return "fallback"
     except Exception:
         return "fallback"
@@ -111,7 +158,16 @@ def run(payload):
             with open(_decision_file(task_id), encoding="utf-8") as f:
                 data = json.load(f)
             if time.time() - data.get("ts", 0) < 600:
-                return data.get("decision")
+                if spec and "choice" in data:
+                    # 用户点选：把选项写进 answers（键=问题文本，值=选项 label），放行
+                    ti = dict(spec["tool_input"])
+                    ti["answers"] = {spec["question"]: data["choice"]}
+                    return {"behavior": "allow", "updatedInput": ti}
+                d = data.get("decision")
+                if d == "allow":
+                    return {"behavior": "allow"}
+                if d == "deny":
+                    return {"behavior": "deny", "message": "已在手机上拒绝（zcode通知）"}
         except Exception:
             pass
         time.sleep(1)

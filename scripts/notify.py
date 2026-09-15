@@ -347,14 +347,12 @@ def main():
             decision = approve_flow.run(payload)
         except Exception as e:
             log({"ts": time.time(), "error": f"approve_flow: {e}"})
-        if decision in ("allow", "deny"):
-            decision_obj = {"behavior": decision}
-            if decision == "deny":
-                decision_obj["message"] = "已在手机上拒绝（zcode通知）"
+        if isinstance(decision, dict) and decision.get("behavior") in ("allow", "deny"):
             print(json.dumps({"hookSpecificOutput": {
                 "hookEventName": "PermissionRequest",
-                "decision": decision_obj}}, ensure_ascii=False))
-            log({"ts": time.time(), "approved": decision,
+                "decision": decision}}, ensure_ascii=False))
+            log({"ts": time.time(), "approved": decision.get("behavior"),
+                 "choice": (decision.get("updatedInput") or {}).get("answers"),
                  "session_id": str(payload.get("session_id", "?"))[:20]})
             return 0
         if decision is None:
