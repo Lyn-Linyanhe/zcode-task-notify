@@ -59,30 +59,62 @@ def self_heal_config(session_id):
 
 
 def ensure_connector():
-    """连接器看门狗：aibot 配置存在且本地 /health 不通 → 用 venv 解释器拉起。"""
+    """连接器看门狗：本地 /health 不通**或 ws 掉线** → 用 venv 解释器拉起。
+
+    注意必须同时看 `connected` 字段：进程活着、HTTP 端口在响应、但 WebSocket 已断时，
+    只判"HTTP 通"会让看门狗永远认为在线、永不重启——现象是推送一直降级到群 webhook、
+    卡片/指令全失效，直到手动重启（2026-09-16 实测：断线 40 分钟无自动恢复，
+    SDK 自身的重连在"服务器主动断开"场景下不可靠）。"""
     cfg_path = os.path.join(BASE, "aibot_config.json")
     if not os.path.exists(cfg_path):
         return
     cfg = load_json(cfg_path, {})
+    port = int(cfg.get("local_port", 17899))
+    need_restart = False
     try:
         import urllib.request
-        urllib.request.urlopen(
-            f"http://127.0.0.1:{int(cfg.get('local_port', 17899))}/health", timeout=1.5).read()
-        return  # 连接器在线
+        data = json.loads(urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/health", timeout=1.5).read().decode("utf-8"))
+        if data.get("connected") and data.get("target"):
+            return  # 连接器在线且已认证绑定
+        need_restart = True  # HTTP 活着但 ws 掉线/未绑定 → 需要重启
     except Exception:
-        pass
+        need_restart = True  # 端口不通（未运行/启动中）
     venv = cfg.get("venv_python")
     if not venv or not os.path.exists(venv):
         return  # 未安装 SDK 环境（install --aibot 才会有）
+    if need_restart:
+        _kill_stale_connector(port)
     try:
         subprocess.Popen(
             [venv, os.path.join(BASE, "aibot_connector.py")],
             creationflags=NOWINDOW, cwd=BASE,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True)
-        log({"ts": time.time(), "connector_spawn": True})
+        log({"ts": time.time(), "connector_spawn": True,
+             "reason": "ws offline" if need_restart else "port down"})
     except Exception as e:
         log({"ts": time.time(), "error": f"connector spawn: {e}"})
+
+
+def _kill_stale_connector(port):
+    """结束掉线/假死的旧连接器进程——否则新实例会因单例锁直接退出，
+    而旧实例又永远不会自愈（ws 断线不重连）。只杀命令行里含本目录连接器脚本的进程。"""
+    try:
+        ps = (f"Get-CimInstance Win32_Process -Filter \"name='python.exe'\" | "
+              f"Where-Object {{ $_.CommandLine -like '*aibot_connector.py*' }} | "
+              f"Select-Object -ExpandProperty ProcessId")
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           capture_output=True, text=True, timeout=30, errors="replace")
+        pids = [int(x) for x in r.stdout.split() if x.strip().isdigit()]
+        for pid in pids:
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           capture_output=True, timeout=30)
+        if pids:
+            log({"ts": time.time(), "connector_killed_stale": pids})
+            time.sleep(1.5)  # 等端口与锁释放
+    except Exception as e:
+        log({"ts": time.time(), "error": f"kill stale connector: {e}"})
 
 
 def main():
