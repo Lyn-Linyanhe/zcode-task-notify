@@ -10,7 +10,12 @@
 旧实现按"最新一行"判断，拿到的永远是上一个已结束的回合，于是每次启动都秒退：
 2026-09-14 实测 52 次启动、45 次"turn finished"秒退、推送 ⏳ 共 0 次——长任务提醒从未生效。
 
-退出条件：回合结束 / 桌面端进程消失 / 达到时长上限。
+异常中止兜底：Stop hook 在进程死亡（桌面端关闭/崩溃/强杀）时不会触发，本心跳是
+唯一能发现"任务没跑完就没了"的组件——回合未结束而桌面端进程消失时，推 🛑 告知
+（复核一次排除瞬时抖动）再退出。
+
+退出条件：回合结束（Stop hook 负责推送结果）/ 桌面端进程消失（先推 🛑 再退出）/
+达到时长上限。
 """
 import json
 import os
@@ -172,17 +177,44 @@ def main():
     while True:
         time.sleep(TICK_SEC)
         now = time.time()
-        if not zcode_alive():
-            hb_log({"ts": now, "exit": "desktop gone", "session_id": session_id})
-            return 0
+        # 顺序关键：回合结束/超限的检查必须在桌面端存活检查**之前**——
+        # 否则"任务刚完成 + 用户立刻关桌面端"会被误报成异常中止
         finished, elapsed_min = turn_progress(turn_id, spawned_at, now)
         if finished:
             hb_log({"ts": now, "exit": "turn finished", "session_id": session_id,
                     "turn_id": turn_id[:20]})
             return 0  # 结果由 Stop hook 推送
+        # 防御：finished=False 时 elapsed 理论上是数字；万一异常返回 None（改代码引入的
+        # 隐式契约破裂），绝不能让 `>=` 抛错崩掉心跳进程（那样提醒会永久失效且无日志）。
+        if elapsed_min is None:
+            hb_log({"ts": now, "error": "elapsed_min is None with finished=False",
+                    "session_id": session_id})
+            return 0
         if elapsed_min >= max_minutes:
             hb_log({"ts": now, "exit": "max duration", "session_id": session_id,
                     "elapsed_min": elapsed_min})
+            return 0
+        if not zcode_alive():
+            # 回合未结束而桌面端进程消失 = 会话异常中止（正常结束的话上面已退出）。
+            # Stop hook 不会在进程死亡时触发，这里就是唯一的通知机会。
+            # 复核一次排除瞬时抖动（如桌面端快速重启）；确认消失才推送。
+            time.sleep(15)
+            if zcode_alive():
+                hb_log({"ts": time.time(), "note": "desktop transient, keep tracking",
+                        "session_id": session_id})
+                continue
+            title = f"🛑 桌面端已关闭，会话随之中止｜{get_session_title(session_id)}"
+            summary = (f"任务未完成（中止时已运行 {elapsed_min} 分钟），"
+                       f"重新打开后需重新交代任务。\n"
+                       f"> {time.strftime('%H:%M')} · {session_id[:16]}")
+            try:
+                ok, channel, _ = send_notification(webhook, title, summary)
+                hb_log({"ts": time.time(), "notified": ok, "channel": channel,
+                        "exit": "desktop closed", "elapsed_min": elapsed_min,
+                        "session_id": session_id})
+            except Exception as e:
+                hb_log({"ts": time.time(), "error": str(e)[:150],
+                        "exit": "desktop closed", "session_id": session_id})
             return 0
         if now >= next_push_at:
             title = f"⏳ 任务仍在运行（已 {elapsed_min} 分钟）｜{get_session_title(session_id)}"

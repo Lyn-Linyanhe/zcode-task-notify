@@ -132,7 +132,64 @@ class TestMainLoop(unittest.TestCase):
         self.assertLessEqual(len(pushes), 4, "到时长上限后应停止推送并退出")
         self.assertLess(clock.t, 1000 + 300, "应在 3 分钟内退出，而不是继续空转")
 
-    def test_desktop_gone_exits_without_push(self):
+    def test_desktop_gone_notifies_abnormal_stop(self):
+        """回合未结束而桌面端进程消失 = 异常中止：推 🛑 告知再退出。
+        Stop hook 在进程死亡时不会触发，这是用户能收到"任务没跑完就没了"的唯一机会。"""
+        clock = FakeTime(1000.0)
+        pushes = []
+        argv = ["heartbeat.py", "sess_x", "--turn-id", "turn_y", "--interval-sec", "60"]
+
+        def capture(webhook, title, summary):
+            pushes.append((title, summary))
+            return True, "aibot", "ok"
+
+        with mock.patch.object(hb, "time", clock), \
+                mock.patch.object(hb, "load_json", lambda path, default=None: {"webhook": "http://x"}), \
+                mock.patch.object(hb, "acquire_lock", lambda *a: True), \
+                mock.patch.object(hb, "hb_log", lambda entry: None), \
+                mock.patch.object(hb, "zcode_alive", lambda: False), \
+                mock.patch.object(hb, "turn_progress", lambda *a: (False, 30)), \
+                mock.patch.object(hb, "get_session_title", lambda s: "测试会话"), \
+                mock.patch.object(hb, "send_notification", capture), \
+                mock.patch.object(sys, "argv", argv):
+            self.assertEqual(hb.main(), 0)
+        self.assertEqual(len(pushes), 1, "应恰好推送一条异常中止告知")
+        title, summary = pushes[0]
+        self.assertIn("🛑 桌面端已关闭", title)
+        self.assertIn("中止时已运行 30 分钟", summary)
+
+    def test_desktop_transient_blip_keeps_tracking(self):
+        """桌面端短暂消失又恢复（如快速重启）→ 不推中止、继续跟踪。"""
+        clock = FakeTime(1000.0)
+        alive = {"calls": 0}
+
+        def zcode():
+            alive["calls"] += 1
+            return alive["calls"] > 1   # 第一次 tick 掉线，之后恢复
+
+        progress = {"n": 0}
+
+        def fake_progress(*a):
+            progress["n"] += 1
+            if progress["n"] >= 3:
+                return True, None          # 第 3 拍回合结束
+            return False, 5 * progress["n"]  # 仍在跑（finished=False 必须给分钟数）
+
+        argv = ["heartbeat.py", "sess_x", "--turn-id", "turn_y", "--interval-sec", "60"]
+        with mock.patch.object(hb, "time", clock), \
+                mock.patch.object(hb, "load_json", lambda path, default=None: {"webhook": "http://x"}), \
+                mock.patch.object(hb, "acquire_lock", lambda *a: True), \
+                mock.patch.object(hb, "hb_log", lambda entry: None), \
+                mock.patch.object(hb, "zcode_alive", zcode), \
+                mock.patch.object(hb, "turn_progress", fake_progress), \
+                mock.patch.object(hb, "send_notification",
+                                  side_effect=AssertionError("瞬时抖动不该推中止")), \
+                mock.patch.object(sys, "argv", argv):
+            self.assertEqual(hb.main(), 0)
+
+    def test_finished_turn_not_reported_as_aborted_even_if_desktop_gone(self):
+        """检查顺序守门：回合已结束 + 桌面端恰好也关了 → 正常退出，
+        绝不能误报"中止"（结束检查必须先于存活检查）。"""
         clock = FakeTime(1000.0)
         argv = ["heartbeat.py", "sess_x", "--turn-id", "turn_y", "--interval-sec", "60"]
         with mock.patch.object(hb, "time", clock), \
@@ -140,9 +197,9 @@ class TestMainLoop(unittest.TestCase):
                 mock.patch.object(hb, "acquire_lock", lambda *a: True), \
                 mock.patch.object(hb, "hb_log", lambda entry: None), \
                 mock.patch.object(hb, "zcode_alive", lambda: False), \
-                mock.patch.object(hb, "turn_progress", lambda *a: (False, 99)), \
+                mock.patch.object(hb, "turn_progress", lambda *a: (True, None)), \
                 mock.patch.object(hb, "send_notification",
-                                  side_effect=AssertionError("桌面端不在时不该推送")), \
+                                  side_effect=AssertionError("已完成的回合不该报中止")), \
                 mock.patch.object(sys, "argv", argv):
             self.assertEqual(hb.main(), 0)
 
