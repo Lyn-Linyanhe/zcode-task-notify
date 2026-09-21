@@ -134,5 +134,29 @@ class TestUninstall(unittest.TestCase):
             self.assertEqual(install.uninstall(self.target), 0)
 
 
+class TestHookTimeouts(unittest.TestCase):
+    """超时值是安装时写进 cli/config.json 的，改错了会静默劣化运行行为，
+    所以在这里钉住契约（此前 install.py 给 Stop 写 5000、而线上实际是 15000，
+    手改过配置却没同步回安装脚本——正是这类漂移）。"""
+
+    def test_every_event_has_a_timeout(self):
+        """漏一个事件，注册时会 KeyError。"""
+        self.assertEqual(set(install.HOOK_TIMEOUTS), set(install.HOOK_EVENTS))
+
+    def test_user_prompt_submit_budget_covers_connector_restart(self):
+        """连接器掉线时 heartbeat_spawn 要「杀假死旧进程（走 PowerShell，秒级）+
+        拉起新实例 + 等锁释放」，实测 5~16s。给 5s 会让这次心跳启动被判失败——
+        现象是钩子面板红叉、且该回合没有长任务进度提醒。"""
+        self.assertGreaterEqual(install.HOOK_TIMEOUTS["UserPromptSubmit"], 20000)
+
+    def test_permission_request_keeps_decision_window(self):
+        """手机批准要留够决策时间（卡片默认等 100s）。"""
+        self.assertGreaterEqual(install.HOOK_TIMEOUTS["PermissionRequest"], 120000)
+
+    def test_stop_has_margin_over_instant_reply(self):
+        """notify.py 秒回后分离启动 push_worker，正常 <1s，但要有余量。"""
+        self.assertGreaterEqual(install.HOOK_TIMEOUTS["Stop"], 15000)
+
+
 if __name__ == "__main__":
     unittest.main()

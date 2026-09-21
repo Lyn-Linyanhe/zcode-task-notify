@@ -10,10 +10,17 @@ import time
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
-from notify import (load_json, log, bot_session_ids, notifications_enabled,  # noqa: E402
-                    STATE_PATH, BOT_STATE)
+from notify import (_atomic_write_json, load_json, log, bot_session_ids,  # noqa: E402
+                    notifications_enabled, STATE_PATH, BOT_STATE)
 
 PROBE_PATH = os.path.join(BASE, "usp_probe.jsonl")
+RESTART_STATE_NAME = "connector_restart.json"  # 上次重启连接器的时刻（节流依据）
+
+
+def restart_state_path():
+    """节流状态文件路径。按调用时的 BASE 计算——测试会把 BASE 指向临时目录，
+    写成模块级常量会让状态落到真实目录、污染后续用例。"""
+    return os.path.join(BASE, RESTART_STATE_NAME)
 # 子进程创建标志。不能用 DETACHED_PROCESS：.venv 的 python.exe 是启动器存根，它转手
 # 拉起真实解释器时不传该标志，于是没有控制台的父进程会让系统新建控制台，Win11 默认
 # 终端（Windows Terminal）就弹出一个窗口——标题是存根路径，看着像 bug 报告。
@@ -71,19 +78,33 @@ def ensure_connector():
     cfg = load_json(cfg_path, {})
     port = int(cfg.get("local_port", 17899))
     need_restart = False
+    reason = ""
     try:
         import urllib.request
         data = json.loads(urllib.request.urlopen(
             f"http://127.0.0.1:{port}/health", timeout=1.5).read().decode("utf-8"))
         if data.get("connected") and data.get("target"):
             return  # 连接器在线且已认证绑定
-        need_restart = True  # HTTP 活着但 ws 掉线/未绑定 → 需要重启
+        need_restart, reason = True, "ws offline"  # HTTP 活着但 ws 掉线/未绑定
     except Exception:
-        need_restart = True  # 端口不通（未运行/启动中）
+        need_restart, reason = True, "port down"  # 端口不通（未运行/启动中）
     venv = cfg.get("venv_python")
     if not venv or not os.path.exists(venv):
         return  # 未安装 SDK 环境（install --aibot 才会有）
     if need_restart:
+        # 节流：连接器从拉起→ws 认证完成实测约 10s，这期间 /health 仍报
+        # connected=false。若用户连着提交几条 prompt，每条都会「判定掉线 → 杀掉正在
+        # 启动的新实例 → 再拉一个」——杀进程要走 PowerShell（秒级），既拖慢提交，又让
+        # 连接器永远起不来。故一个宽限窗内只重启一次，窗内只记日志、不动作。
+        now = time.time()
+        grace = int(load_json(os.path.join(BASE, "config.json"), {})
+                    .get("connector_restart_grace_sec", 60))
+        last = float(load_json(restart_state_path(), {}).get("last_restart", 0) or 0)
+        if now - last < grace:
+            log({"ts": now, "connector_restart_throttled": True, "reason": reason,
+                 "since_s": round(now - last, 1), "grace_s": grace})
+            return
+        _atomic_write_json(restart_state_path(), {"last_restart": now})
         _kill_stale_connector(port)
     try:
         subprocess.Popen(
@@ -91,8 +112,7 @@ def ensure_connector():
             creationflags=NOWINDOW, cwd=BASE,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True)
-        log({"ts": time.time(), "connector_spawn": True,
-             "reason": "ws offline" if need_restart else "port down"})
+        log({"ts": time.time(), "connector_spawn": True, "reason": reason})
     except Exception as e:
         log({"ts": time.time(), "error": f"connector spawn: {e}"})
 

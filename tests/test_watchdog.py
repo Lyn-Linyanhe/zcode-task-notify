@@ -12,6 +12,7 @@
 import json
 import os
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -101,6 +102,38 @@ class TestEnsureConnector(unittest.TestCase):
         os.remove(self.venv)
         self._run({"ok": True, "connected": False})
         self.assertEqual(self.spawned, [], "没有 venv 解释器时不该 spawn")
+
+    def test_restart_is_throttled_within_grace(self):
+        """刚重启过又判掉线 → 不再杀+拉。
+
+        连接器从拉起→ws 认证完成实测约 10s，这期间 /health 必然仍是
+        connected=false。不节流的话，连着提交几条 prompt 就会把正在启动的新实例
+        反复杀掉（杀进程走 PowerShell，秒级），连接器永远起不来、每次提交都被拖慢。
+        """
+        health = {"ok": True, "connected": False, "target": True}
+        self._run(health)
+        self.assertEqual(len(self.spawned), 1, "首次掉线应拉起")
+        self.assertEqual(self.killed, [17899], "首次掉线应清掉假死旧进程")
+
+        self._run(health)  # 宽限窗内的第二次
+        self.assertEqual(len(self.spawned), 1, "宽限窗内不该重复拉起")
+        self.assertEqual(self.killed, [17899], "宽限窗内不该重复杀进程")
+        self.assertTrue(any(e.get("connector_restart_throttled") for e in self.logs),
+                        "被节流时应留下日志，便于事后排查")
+
+    def test_restart_retried_after_grace(self):
+        """宽限窗过期后仍掉线 → 允许再重启，节流不等于永久放弃自愈。"""
+        with open(hs.restart_state_path(), "w", encoding="utf-8") as f:
+            json.dump({"last_restart": time.time() - 3600}, f)
+        self._run({"ok": True, "connected": False, "target": True})
+        self.assertEqual(len(self.spawned), 1, "宽限窗过期后应重新拉起")
+        self.assertEqual(self.killed, [17899], "过期后应重新清旧进程")
+
+    def test_healthy_connector_writes_no_restart_state(self):
+        """健康时不写节流状态——否则真掉线时会被上次留下的旧时间戳挡住。"""
+        self._run({"ok": True, "connected": True, "target": True})
+        self.assertFalse(os.path.exists(hs.restart_state_path()),
+                         "健康路径不该产生节流状态文件")
 
 
 class TestKillStale(unittest.TestCase):

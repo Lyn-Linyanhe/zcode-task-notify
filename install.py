@@ -26,6 +26,17 @@ SCRIPTS_DIR = os.path.join(HERE, "scripts")
 EXAMPLE = os.path.join(HERE, "config.example.json")
 
 HOOK_EVENTS = ["Stop", "PermissionRequest", "UserPromptSubmit"]
+# 各事件的 hook 超时（毫秒）。
+# - PermissionRequest：给手机批准留 120s 决策窗口（连接器不在线时流程秒退，不受影响）
+# - UserPromptSubmit：heartbeat_spawn 正常 ~300ms，但连接器掉线时要「杀假死旧进程
+#   （走 PowerShell，秒级）+ 拉起新实例 + 等锁释放」，实测可达 5~16s。5s 会让这次
+#   心跳启动被判失败（现象：钩子面板红叉，且该回合没有长任务进度提醒）。
+# - Stop：notify.py 秒回后分离启动 push_worker，正常 <1s，15s 留足余量。
+HOOK_TIMEOUTS = {
+    "Stop": 15000,
+    "PermissionRequest": 120000,
+    "UserPromptSubmit": 20000,
+}
 MIN_PY = (3, 10)
 WEBHOOK_PREFIX = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key="
 WEBHOOK_HINT = ("  获取路径：手机企业微信 → 群 → 右上角「···」→「消息推送」→ 添加自定义消息推送\n"
@@ -254,8 +265,7 @@ def main():
                 "type": "process",
                 "command": sys.executable or "python",
                 "args": [os.path.join(SCRIPTS_DIR, entry_script)],
-                # PermissionRequest 给手机批准留 120s 决策窗口（连接器不在线时流程秒退，不受影响）
-                "timeoutMs": 120000 if event == "PermissionRequest" else 5000,
+                "timeoutMs": HOOK_TIMEOUTS[event],
             }]
         })
         events[event] = kept
