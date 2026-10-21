@@ -16,9 +16,13 @@ from notify import (load_json, log, make_summary, send_notification,  # noqa: E4
                     get_session_title, notifications_enabled,
                     CONFIG_PATH, STATE_PATH, SESSION_DB, MAX_SUMMARY)
 
-SUMMARY_SYSTEM = ("把 AI 助手的任务回复压缩成一条微信通知摘要：一句话说清做了什么和结果，"
-                  "60字以内，直接给内容，不要客套和markdown，保留关键数字。"
-                  "如果回复是创作内容（小说/文案等），给出作品标题和一句话内容亮点。")
+SUMMARY_SYSTEM = (
+    "把 AI 助手的任务回复压缩成一条微信通知，只写两件事：①做成了什么 ②产出的东西叫什么。"
+    "不要复述过程、不要解释原因、不要提遇到的问题或排查思路、不要写代码和命令。"
+    "40字以内，一句话；有产出物就点出名称（如「18 页精读版 PPT」「价格对比表」）。"
+    "直接给内容，不要客套和 markdown。"
+    "如果回复是创作内容（小说/文案等），给出作品标题和一句话内容亮点。"
+)
 
 
 def bot_session_ids():
@@ -218,7 +222,9 @@ def main():
             body = llm
             log({"ts": time.time(), "llm_summary_used": True, "session_id": result["session_id"]})
 
-    final = f"{body}\n> {time.strftime('%H:%M')} · {result['session_id'][:16]}"
+    # 只保留时间戳。会话 ID（sess_xxxx）对手机阅读没有价值——标题里已经有
+    # 可读的会话名了，再挂一串技术 ID 只是噪音。
+    final = f"{body}\n> {time.strftime('%H:%M')}"
     ok, channel, detail = send_notification(config.get("webhook"), result["title"], final)
     log({"ts": time.time(), "pushed": ok, "channel": channel, "detail": detail[:200],
          "session_id": result["session_id"], "title": result["title"]})

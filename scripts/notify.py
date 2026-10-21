@@ -210,29 +210,70 @@ def _clean_line(s):
     return re.sub(r"\s+", " ", s).strip()
 
 
+# 代码/命令行特征：这些行对「做了什么、产出了什么」没有信息量，却极容易被当成
+# 结论行抓走（实测：agent 回复里的一行 JS 被当成摘要，输出成
+# 「关键找到了：：t.last_assistant_message = e.responseText ...」）。
+_CODE_LINE = re.compile(
+    r"(=>|->|;;|\b(function|const|let|var|return|import|export|class|def|await)\b"
+    r"|^\s*[\{\}\[\]\(\)]|[\{\};]\s*$|=\s*[\w\"'`\[{]|\.\w+\()"
+)
+
+
+def _strip_code_blocks(text):
+    """把 ``` 围栏块与行内 `code` 整段去掉，只留自然语言。
+
+    围栏块先整体删除（含内容），行内反引号只去掉反引号本身——行内往往是
+    命令名/文件名，是有效信息，不该连词一起丢。
+    """
+    text = re.sub(r"```.*?```", " ", text, flags=re.S)
+    text = re.sub(r"~~~.*?~~~", " ", text, flags=re.S)
+    return re.sub(r"`([^`]*)`", r"\1", text)
+
+
 def make_summary(text, limit=MAX_SUMMARY):
-    """启发式摘要：结论行 > 加粗/标题行 > 末段 > 首段，过滤客套开头。
-    短标题行（如小说标题）自动拼接后续第一句实质内容，避免摘要只剩标题。"""
+    """启发式摘要：摘要「结果 + 产出物名称」，不复述过程。
+
+    选行优先级：结果句（已完成/产出/生成了…）> 结论句 > 加粗/标题行 >
+    末段 > 首段。代码块与代码特征行在选行之前就被剔除——它们占满了 agent
+    回复的篇幅，却是最没有摘要价值的内容。
+
+    选中结果句后还会再收一次：只保留「做了什么 + 产出了什么」的分句，
+    把「为什么/过程中遇到什么」砍掉（用户明确只要结果与产出物名称）。
+    """
     if not text:
         return ""
+    text = _strip_code_blocks(text)
     raw_lines = [l.strip() for l in text.split("\n") if l.strip()]
     lines = [_clean_line(l) for l in raw_lines]
-    lines = [l for l in lines if l and not _FILLER.match(l)]
+    lines = [l for l in lines if l and not _FILLER.match(l) and not _CODE_LINE.search(l)]
     if not lines:
         return ""
 
-    def _take(idx):
+    def _take(idx, compress=False):
         """候选行太短（<15字）时拼接后续第一行实质内容。"""
         cand = lines[idx]
         if len(cand) < 15:
             nxt = next((l for l in lines[idx + 1:] if len(l) >= 15), None)
             if nxt:
                 cand = f"{cand}：{nxt[:limit - len(cand) - 1]}"
+        if compress:
+            cand = _result_only(cand)
         return cand[:limit] + ("…" if len(cand) > limit else "")
 
+    # 1) 结果句：说清「做成了什么、产出了什么」——这是用户唯一要的。
+    #    取**最后**一个结果句：agent 通常先报中间进展（"修复了X"）、最后才给
+    #    最终交付（"已完成…产出…"）。取第一个会把过程当成结果。
+    results = [i for i, l in enumerate(lines)
+               if re.match(r"^(已完成|完成了|已生成|生成了|已产出|产出了|已保存|保存到|"
+                           r"已整理|整理完成|已修复|修复了|已实现|实现了|已更新|更新了|"
+                           r"已创建|创建了|成功|最终)", l)]
+    if results:
+        return _take(results[-1], compress=True)
+    # 2) 显式结论句
     cand = next((i for i, l in enumerate(lines) if re.match(r"^(结论|总结|总之|综上|所以|最终|一句话|答案是)", l)), None)
     if cand is not None:
-        return _take(cand)
+        return _take(cand, compress=True)
+    # 3) 加粗/标题行（agent 常用它们标注交付物）
     for i, raw in enumerate(raw_lines):
         if i >= len(lines):
             break
@@ -241,9 +282,41 @@ def make_summary(text, limit=MAX_SUMMARY):
             return _take(i)
         if raw.startswith("#"):
             return _take(i)
-    if len(lines) > 1 and len(lines[-1]) <= limit:
-        return _take(len(lines) - 1)
+    # 4) 没有结果句也没有结论——这多半是「分析/排查过程」型回复。
+    #    先试着按分句抽出结果（一句话里可能前半是原因、后半才是结果），
+    #    抽到了就用；抽不到再退到最短实质句。
+    for i in range(len(lines) - 1, -1, -1):
+        squeezed = _result_only(lines[i])
+        if squeezed != lines[i]:
+            return squeezed[:limit] + ("…" if len(squeezed) > limit else "")
+    if len(lines) > 1:
+        shortest = min(range(len(lines)), key=lambda i: len(lines[i]))
+        picked = _take(shortest)
+        if len(picked) <= limit:
+            return picked
     return _take(0)
+
+
+# 只留结果与产出：以这些词开头的分句保留，其余（原因、过程、悬念）丢掉。
+_RESULT_CLAUSE = re.compile(
+    r"^(已完成|完成了|已生成|生成了|已产出|产出了|已保存|保存到|已整理|整理完成|"
+    r"已修复|修复了|已实现|实现了|已更新|更新了|已创建|创建了|成功|产出|共|计)"
+)
+
+
+def _result_only(sentence):
+    """把一句话收成「结果 + 产出物」：按分句切，只留结果类分句。
+
+    实测样本：「先读了 README，然后跑了测试，发现有 3 个失败。修复了 python3
+    指向问题。最终结果是：已完成插件环境修复」→ 只留最后那句。
+    若切完一个都不剩，原样返回（宁可不压，也别把摘要压空）。
+    """
+    parts = [p.strip() for p in re.split(r"[。；;！!？?\n]", sentence) if p.strip()]
+    kept = [p for p in parts if _RESULT_CLAUSE.match(p)]
+    if not kept:
+        return sentence
+    # 只留最后一个结果分句：同一句里"修复了 A，已完成 B"，B 才是交付。
+    return kept[-1]
 
 
 def send_wecom_once(webhook, title, summary):
