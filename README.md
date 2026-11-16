@@ -243,6 +243,8 @@ python install.py --uninstall
 12. **卡片按钮的文字预算只有约 2 个汉字**（2026-09-15 实测三按钮卡）：写「🅰 继续收尾」会被截成「A…」。所以多选卡的**完整选项文本放描述行**（`sub_title_text` 空间充裕），按钮只放 `A/B/C` 短标签，点击回流后由连接器按 task_id 存的映射还原成完整文案。**原位更新是整卡替换**：结果卡不带回原标题的话，会话名就丢了——所以发卡时的标题记在连接器内存（`TASK_META`），更新时拼回去（决定文案挪到 desc 行）。微信通知预览/聊天列表只显示标题行，所以**会话名必须在标题里**，放正文等于没有。`AskUserQuestion` 会触发 PermissionRequest、payload 带完整选项、`allow + updatedInput` 能把选择回注——均已真机端到端验证（手机点选 → agent 收到答案继续跑）。
 13. **不要把本工具装两份同时跑**：hooks 注册会被重装自动清理（见坑 11），但**旧拷贝的连接器进程不会被杀**——它仍持有长连接、仍处理微信指令，只是写的 state/decisions 落在旧目录，新 hooks 读的是新目录。现象很隐蔽：「静默/恢复」看似生效实则无效、每张权限卡必等 100 秒超时回退桌面。换位置安装后请确认旧目录里没有存活的 `aibot_connector` 进程（任务管理器搜 python，或跑 `python doctor.py` 看连接器路径）。
 
+14. **侧边对话也会触发 hooks，且 ID 与主会话同为普通 `sess_…`**：仅过滤 `sess_subagent` 会漏掉 `selection_side_chat`。完成通知与心跳现在只读查询 `session.task_type`，排除 `selection_side_chat`、`subagent_child`、`workflow_child`，保留旧子代理前缀兜底。普通分支不因有 `parent_id` 被屏蔽；权限审批提示仍保留。数据库不可读或旧 schema 缺少类型列时保留通知，避免误屏蔽主会话。
+
 ## 故障排查
 
 | 现象 | 排查 |

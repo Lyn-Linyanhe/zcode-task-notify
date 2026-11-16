@@ -13,7 +13,7 @@ import urllib.request
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 from notify import (load_json, log, make_summary, send_notification,  # noqa: E402
-                    get_session_title, notifications_enabled,
+                    get_session_title, notifications_enabled, is_background_session,
                     CONFIG_PATH, STATE_PATH, SESSION_DB, MAX_SUMMARY)
 
 SUMMARY_SYSTEM = (
@@ -162,8 +162,8 @@ def process_payload(payload):
                 "event": event, "session_id": session_id}
     if session_id in bot_session_ids():
         return {"action": "skip", "reason": "bot session", "session_id": session_id}
-    if session_id.startswith("sess_subagent"):
-        return {"action": "skip", "reason": "subagent", "session_id": session_id}
+    if event == "Stop" and is_background_session(session_id):
+        return {"action": "skip", "reason": "background session", "session_id": session_id}
 
     if event == "PermissionRequest":
         title, body = "⏸️ 任务等待你的确认", "ZCode 需要你批准一个操作，回电脑或微信里处理。"
@@ -221,6 +221,11 @@ def main():
         if llm:
             body = llm
             log({"ts": time.time(), "llm_summary_used": True, "session_id": result["session_id"]})
+
+    # 等待终态与摘要期间，会话类型可能才落库；发送前再次确认。
+    if result["event"] == "Stop" and is_background_session(result["session_id"]):
+        log({"ts": time.time(), "skipped": "background session", "session_id": result["session_id"]})
+        return 0
 
     # 只保留时间戳。会话 ID（sess_xxxx）对手机阅读没有价值——标题里已经有
     # 可读的会话名了，再挂一串技术 ID 只是噪音。

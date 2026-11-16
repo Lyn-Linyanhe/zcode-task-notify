@@ -158,6 +158,25 @@ def get_session_title(session_id):
     return (session_id or "未知会话")[:20]
 
 
+def is_background_session(session_id):
+    """内部子会话不单独报完成/进度；普通分支不能仅凭 parent_id 被屏蔽。"""
+    if not session_id:
+        return False
+    if session_id.startswith("sess_subagent"):
+        return True
+    con = None
+    try:
+        from pathlib import Path
+        con = sqlite3.connect(Path(SESSION_DB).resolve().as_uri() + "?mode=ro", uri=True, timeout=0.2)
+        row = con.execute("SELECT task_type FROM session WHERE id=?", (session_id,)).fetchone()
+        return bool(row and row[0] in ("selection_side_chat", "subagent_child", "workflow_child"))
+    except (sqlite3.Error, OSError, ValueError):
+        return False  # 旧版 schema/尚未落库时保留通知，避免误屏蔽主会话
+    finally:
+        if con is not None:
+            con.close()
+
+
 def bot_session_ids():
     state = load_json(BOT_STATE, {})
     bots = state.get("bots")
@@ -438,6 +457,10 @@ def main():
         payload = {}
 
     event = payload.get("hookEventName") or payload.get("hook_event_name") or "?"
+    session_id = payload.get("session_id") or payload.get("sessionId") or ""
+    if event == "Stop" and is_background_session(session_id):
+        log({"ts": time.time(), "skipped": "background session", "session_id": session_id})
+        return 0
 
     # 快速闸门：开关关闭/定时静默就静默退出（对通知和手机决策流一并生效，详细过滤在 worker 里）
     state = load_json(STATE_PATH, {"enabled": True})

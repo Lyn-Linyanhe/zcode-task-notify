@@ -26,7 +26,7 @@ import time
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 from notify import (load_json, get_session_title, send_notification,  # noqa: E402
-                    notifications_enabled, CONFIG_PATH, STATE_PATH, SESSION_DB, BOT_STATE)
+                    notifications_enabled, is_background_session, CONFIG_PATH, STATE_PATH, SESSION_DB, BOT_STATE)
 
 HB_LOG = os.path.join(BASE, "heartbeat_log.jsonl")
 TERMINAL = ("completed", "error", "cancelled")
@@ -152,7 +152,7 @@ def main():
     interval_sec = interval_sec or int(config.get("heartbeat_interval_min", 30)) * 60
     max_minutes = max_minutes or int(config.get("heartbeat_max_hours", 4)) * 60
 
-    if not session_id or is_bot_session(session_id):
+    if not session_id or is_bot_session(session_id) or is_background_session(session_id):
         return 0
     state = load_json(STATE_PATH, {"enabled": True})
     if not notifications_enabled(state)[0]:
@@ -203,6 +203,8 @@ def main():
                 hb_log({"ts": time.time(), "note": "desktop transient, keep tracking",
                         "session_id": session_id})
                 continue
+            if is_background_session(session_id):
+                return 0
             title = f"🛑 桌面端已关闭，会话随之中止｜{get_session_title(session_id)}"
             summary = (f"任务未完成（中止时已运行 {elapsed_min} 分钟），"
                        f"重新打开后需重新交代任务。\n"
@@ -217,6 +219,8 @@ def main():
                         "exit": "desktop closed", "session_id": session_id})
             return 0
         if now >= next_push_at:
+            if is_background_session(session_id):
+                return 0
             title = f"⏳ 任务仍在运行（已 {elapsed_min} 分钟）｜{get_session_title(session_id)}"
             summary = f"长任务尚未结束，不需要操作。\n> {time.strftime('%H:%M')} · {session_id[:16]}"
             try:
