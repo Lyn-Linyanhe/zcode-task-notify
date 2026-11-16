@@ -245,6 +245,8 @@ python install.py --uninstall
 
 14. **侧边对话也会触发 hooks，且 ID 与主会话同为普通 `sess_…`**：仅过滤 `sess_subagent` 会漏掉 `selection_side_chat`。完成通知与心跳现在只读查询 `session.task_type`，排除 `selection_side_chat`、`subagent_child`、`workflow_child`，保留旧子代理前缀兜底。普通分支不因有 `parent_id` 被屏蔽；权限审批提示仍保留。数据库不可读或旧 schema 缺少类型列时保留通知，避免误屏蔽主会话。
 
+15. **运行中的心跳必须在发送前重读静默状态**：启动时的开关快照不能代表后续状态。手动/定时静默期间跳过当次进度通知，到期恢复后不补发积压。桌面进程消失后的 15 秒复核窗口也可能等到回合终态落库，必须复查终态，避免把完成误报为中止。
+
 ## 故障排查
 
 | 现象 | 排查 |

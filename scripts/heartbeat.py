@@ -205,6 +205,15 @@ def main():
                 continue
             if is_background_session(session_id):
                 return 0
+            # 复核等待期间终态可能才写入，不能沿用等待前的判断。
+            finished, latest_elapsed = turn_progress(turn_id, spawned_at, time.time())
+            if finished:
+                hb_log({"ts": time.time(), "exit": "turn finished", "session_id": session_id})
+                return 0
+            if latest_elapsed is not None:
+                elapsed_min = latest_elapsed
+            if not notifications_enabled(load_json(STATE_PATH, {"enabled": True}), now=time.time())[0]:
+                return 0
             title = f"🛑 桌面端已关闭，会话随之中止｜{get_session_title(session_id)}"
             summary = (f"任务未完成（中止时已运行 {elapsed_min} 分钟），"
                        f"重新打开后需重新交代任务。\n"
@@ -221,6 +230,10 @@ def main():
         if now >= next_push_at:
             if is_background_session(session_id):
                 return 0
+            if not notifications_enabled(load_json(STATE_PATH, {"enabled": True}), now=now)[0]:
+                # 跳过这一拍，但继续跟踪；静默到期后按原间隔恢复，不补发积压。
+                next_push_at = now + interval_sec
+                continue
             title = f"⏳ 任务仍在运行（已 {elapsed_min} 分钟）｜{get_session_title(session_id)}"
             summary = f"长任务尚未结束，不需要操作。\n> {time.strftime('%H:%M')} · {session_id[:16]}"
             try:

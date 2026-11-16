@@ -262,9 +262,14 @@ def make_summary(text, limit=MAX_SUMMARY):
     if not text:
         return ""
     text = _strip_code_blocks(text)
-    raw_lines = [l.strip() for l in text.split("\n") if l.strip()]
-    lines = [_clean_line(l) for l in raw_lines]
-    lines = [l for l in lines if l and not _FILLER.match(l) and not _CODE_LINE.search(l)]
+    candidates = []
+    for raw in text.split("\n"):
+        clean = _clean_line(raw)
+        if clean and not _FILLER.match(clean) and not _CODE_LINE.search(clean):
+            candidates.append((raw.strip(), clean))
+    # 原文标记与清洗结果一起过滤，确保标题/加粗行的索引不会错位。
+    raw_lines = [raw for raw, _ in candidates]
+    lines = [clean for _, clean in candidates]
     if not lines:
         return ""
 
@@ -294,8 +299,6 @@ def make_summary(text, limit=MAX_SUMMARY):
         return _take(cand, compress=True)
     # 3) 加粗/标题行（agent 常用它们标注交付物）
     for i, raw in enumerate(raw_lines):
-        if i >= len(lines):
-            break
         mm = re.search(r"\*\*(.+?)\*\*", raw)
         if mm and len(_clean_line(mm.group(1))) >= 8:
             return _take(i)
