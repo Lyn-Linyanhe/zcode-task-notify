@@ -79,5 +79,35 @@ class TestLlmTimeout(unittest.TestCase):
             self.assertIsNone(pw.llm_summary("正文", _cfg()))
 
 
+    def test_blank_public_text_falls_back_in_both_formats(self):
+        responses = {
+            "anthropic": {"content": [{"type": "text", "text": " \n\t "}]},
+            "openai": {"choices": [{"message": {"content": " \n\t "}}]},
+        }
+        for fmt, body in responses.items():
+            with self.subTest(fmt=fmt), \
+                    mock.patch.object(pw.urllib.request, "urlopen") as request, \
+                    mock.patch.object(pw, "log"):
+                request.return_value.read.return_value = json.dumps(body).encode("utf-8")
+                self.assertIsNone(pw.llm_summary("已生成年度报告.xlsx", _cfg(llm_api_format=fmt)))
+
+    def test_reasoning_is_not_used_as_notification_text(self):
+        response = {"choices": [{"message": {
+            "content": "", "reasoning_content": "需要先分析哪些内容可以保留，然后组织摘要。"
+        }}]}
+        with mock.patch.object(pw.urllib.request, "urlopen") as request, \
+                mock.patch.object(pw, "log"):
+            request.return_value.read.return_value = json.dumps(response).encode("utf-8")
+            self.assertIsNone(pw.llm_summary("已生成年度报告.xlsx", _cfg()))
+
+    def test_invalid_timeout_falls_back_without_request(self):
+        for value in (None, "bad", 0, -1, "nan", "inf"):
+            with self.subTest(value=value), \
+                    mock.patch.object(pw.urllib.request, "urlopen") as request, \
+                    mock.patch.object(pw, "log"):
+                self.assertIsNone(pw.llm_summary("已生成年度报告.xlsx", _cfg(llm_timeout_sec=value)))
+                request.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

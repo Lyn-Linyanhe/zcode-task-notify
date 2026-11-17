@@ -252,9 +252,8 @@ def _strip_code_blocks(text):
 def make_summary(text, limit=MAX_SUMMARY):
     """启发式摘要：摘要「结果 + 产出物名称」，不复述过程。
 
-    选行优先级：结果句（已完成/产出/生成了…）> 结论句 > 加粗/标题行 >
-    末段 > 首段。代码块与代码特征行在选行之前就被剔除——它们占满了 agent
-    回复的篇幅，却是最没有摘要价值的内容。
+    选行优先级：明确产出句（多份产物合并）> 结果句 > 结论句 > 加粗/标题行 >
+    最短实质行。代码块与代码特征行在选行之前就被剔除。
 
     选中结果句后还会再收一次：只保留「做了什么 + 产出了什么」的分句，
     把「为什么/过程中遇到什么」砍掉（用户明确只要结果与产出物名称）。
@@ -272,6 +271,17 @@ def make_summary(text, limit=MAX_SUMMARY):
     lines = [clean for _, clean in candidates]
     if not lines:
         return ""
+
+    # 多份交付物可能分散在不同行，不能被最后一句「全部完成」覆盖。
+    deliveries = []
+    for line in lines:
+        for clause in re.split(r"[。；;！!？?\n]", line):
+            clause = clause.strip()
+            if _DELIVERY_CLAUSE.search(clause) and clause not in deliveries:
+                deliveries.append(clause)
+    if deliveries:
+        summary = "；".join(deliveries)
+        return summary[:limit] + ("…" if len(summary) > limit else "")
 
     def _take(idx, compress=False):
         """候选行太短（<15字）时拼接后续第一行实质内容。"""
@@ -318,6 +328,9 @@ def make_summary(text, limit=MAX_SUMMARY):
             return picked
     return _take(0)
 
+
+# 明确的交付物句先于泛泛的「全部完成」，同时保留额外生成的其他产物。
+_DELIVERY_CLAUSE = re.compile(r"(?:^|[，,：:]\s*)(?:另|另外|同时)?(?:已)?(?:产出|生成)(?:了)?\s*\S")
 
 # 只留结果与产出：以这些词开头的分句保留，其余（原因、过程、悬念）丢掉。
 _RESULT_CLAUSE = re.compile(

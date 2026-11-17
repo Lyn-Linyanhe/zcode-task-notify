@@ -4,6 +4,7 @@
      → 摘要（可选 LLM 增强，失败自动回退启发式）→ 企业微信推送（带重试）→ 清理。
 """
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -109,9 +110,11 @@ def llm_summary(text, cfg):
     # 摘要只影响通知的"可读性"，不该拖慢通知本身：超时默认 15 秒（旧值写死 25 秒，
     # 实测 39 次尝试里 9 次跑满 25 秒读超时后仍回退启发式——白等 25 秒；后收紧到 10 秒，
     # 但成功样本有 8.9s/12.0s 两档，10 秒会误杀慢摘要，经用户确认定 15 秒）。
-    timeout_s = float(cfg.get("llm_timeout_sec", 15))
     t0 = time.time()
     try:
+        timeout_s = float(cfg.get("llm_timeout_sec", 15))
+        if not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise ValueError("llm_timeout_sec must be positive and finite")
         if fmt == "anthropic":
             url = base + "/v1/messages"
             body = {"model": model, "max_tokens": 150, "system": SUMMARY_SYSTEM,
@@ -132,13 +135,22 @@ def llm_summary(text, cfg):
             out = "".join(c.get("text", "") for c in resp.get("content", []) if c.get("type") == "text")
         else:
             msg = resp["choices"][0]["message"]
-            out = (msg.get("content") or "").strip() or (msg.get("reasoning_content") or "").strip()
+            out = (msg.get("content") or "").strip()
         log({"ts": time.time(), "llm_ms": int((time.time() - t0) * 1000)})
-        return out[:MAX_SUMMARY] or None
+        return out.strip()[:MAX_SUMMARY] or None
     except Exception as e:
         log({"ts": time.time(), "llm_error": str(e)[:150],
              "llm_ms": int((time.time() - t0) * 1000)})
         return None
+
+
+def _response_text(payload):
+    """完整回复优先；预览只在完整回复缺失或空白时兜底。"""
+    for field in ("responseText", "responsePreview"):
+        text = payload.get(field)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    return ""
 
 
 def process_payload(payload):
@@ -187,7 +199,7 @@ def process_payload(payload):
         dur = format_duration(dur_ms)
         if dur:
             title += f"（耗时 {dur}）"
-        body = make_summary(payload.get("responsePreview") or payload.get("responseText") or "")
+        body = make_summary(_response_text(payload))
         if not body:
             body = "回合已结束，未能读取数据库状态（稍后可在桌面端查看结果）。"
     else:
@@ -217,7 +229,7 @@ def main():
     config = load_json(CONFIG_PATH, {})
     body = result["body"]
     if result["event"] == "Stop":
-        llm = llm_summary(payload.get("responsePreview") or payload.get("responseText") or "", config)
+        llm = llm_summary(_response_text(payload), config)
         if llm:
             body = llm
             log({"ts": time.time(), "llm_summary_used": True, "session_id": result["session_id"]})
@@ -225,6 +237,12 @@ def main():
     # 等待终态与摘要期间，会话类型可能才落库；发送前再次确认。
     if result["event"] == "Stop" and is_background_session(result["session_id"]):
         log({"ts": time.time(), "skipped": "background session", "session_id": result["session_id"]})
+        return 0
+
+    # 等终态或模型摘要时，用户可能开启了静默；以发送前的最新状态为准。
+    ok, reason = notifications_enabled(load_json(STATE_PATH, {"enabled": True}))
+    if not ok:
+        log({"ts": time.time(), "skipped": reason, "session_id": result["session_id"]})
         return 0
 
     # 只保留时间戳。会话 ID（sess_xxxx）对手机阅读没有价值——标题里已经有
