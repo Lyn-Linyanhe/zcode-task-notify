@@ -11,7 +11,7 @@ import time
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 from notify import (_atomic_write_json, load_json, log, bot_session_ids,  # noqa: E402
-                    notifications_enabled, STATE_PATH, BOT_STATE)
+                    notifications_enabled, is_background_session, STATE_PATH, BOT_STATE)
 
 PROBE_PATH = os.path.join(BASE, "usp_probe.jsonl")
 RESTART_STATE_NAME = "connector_restart.json"  # 上次重启连接器的时刻（节流依据）
@@ -148,6 +148,9 @@ def main():
 
     self_heal_config(session_id)
     ensure_connector()
+    # 连接器也负责手机审批，内部会话仍须维护连接；只跳过进度心跳。
+    if is_background_session(session_id):
+        return 0
 
     # 探针：捕获 payload 结构（保留最近 20 条）
     try:
@@ -168,8 +171,6 @@ def main():
     bots = load_json(BOT_STATE, {}).get("bots")
     items = bots.values() if isinstance(bots, dict) else (bots or [])
     if any(b.get("activeTaskId") == session_id for b in items if isinstance(b, dict)):
-        return 0
-    if session_id.startswith("sess_subagent"):
         return 0
 
     # 分离进程启动心跳

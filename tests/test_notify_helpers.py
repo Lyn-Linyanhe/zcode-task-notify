@@ -113,5 +113,34 @@ class TestSummaryPrefersResult(unittest.TestCase):
         self.assertIn("完成", got)
 
 
+    def test_multiple_deliverables_in_one_line_are_kept(self):
+        got = make_summary("已生成年度报告.xlsx。已生成预算明细.csv。")
+        self.assertIn("年度报告.xlsx", got)
+        self.assertIn("预算明细.csv", got)
+
+    def test_generic_final_sentence_does_not_hide_deliverables(self):
+        for separator in ("。", "\n"):
+            with self.subTest(separator=separator):
+                text = separator.join(("已产出18页精读版PPT", "已产出28页拓展版PPT", "已完成全部工作"))
+                got = make_summary(text)
+                self.assertIn("18页精读版PPT", got)
+                self.assertIn("28页拓展版PPT", got)
+
+    def test_additional_deliverable_is_not_lost(self):
+        got = make_summary("已完成交付。产出年度报告.xlsx。另生成预算明细.csv。")
+        self.assertIn("年度报告.xlsx", got)
+        self.assertIn("预算明细.csv", got)
+
+    def test_result_and_additional_deliverable_are_both_kept(self):
+        got = make_summary("已完成报告，产出精读版PPT。另生成拓展版PPT。")
+        self.assertIn("精读版PPT", got)
+        self.assertIn("拓展版PPT", got)
+
+    def test_repeated_deliverable_is_not_repeated_in_summary(self):
+        got = make_summary("已生成年度报告.xlsx。\n已生成年度报告.xlsx。\n已生成预算明细.csv。")
+        self.assertEqual(got.count("年度报告.xlsx"), 1)
+        self.assertIn("预算明细.csv", got)
+
+
 if __name__ == "__main__":
     unittest.main()
